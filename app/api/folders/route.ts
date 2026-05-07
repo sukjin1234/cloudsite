@@ -26,56 +26,58 @@ export async function GET(request: Request) {
     return jsonError("Invalid parent folder", 400);
   }
 
-  let currentFolder = null;
+  const currentFolderQuery = parentId
+    ? context.supabase
+        .from("cloud_folders")
+        .select(FOLDER_SELECT)
+        .eq("id", parentId)
+        .single()
+    : Promise.resolve({ data: null, error: null });
 
-  if (parentId) {
-    const { data, error } = await context.supabase
-      .from("cloud_folders")
-      .select(FOLDER_SELECT)
-      .eq("id", parentId)
-      .single();
-
-    if (error || !data) {
-      return jsonError("Folder not found", 404);
-    }
-
-    currentFolder = data;
-  }
-
-  const folderResult = parentId
-    ? await context.supabase
+  const folderQuery = parentId
+    ? context.supabase
         .from("cloud_folders")
         .select(FOLDER_SELECT)
         .eq("parent_id", parentId)
         .order("name", { ascending: true })
-    : await context.supabase
+    : context.supabase
         .from("cloud_folders")
         .select(FOLDER_SELECT)
         .is("parent_id", null)
         .order("name", { ascending: true });
 
-  if (folderResult.error) {
-    return jsonError(folderResult.error.message, 500);
-  }
-
-  const fileResult = parentId
-    ? await context.supabase
+  const fileQuery = parentId
+    ? context.supabase
         .from("cloud_files")
         .select(FILE_SELECT)
         .eq("folder_id", parentId)
         .order("name", { ascending: true })
-    : await context.supabase
+    : context.supabase
         .from("cloud_files")
         .select(FILE_SELECT)
         .is("folder_id", null)
         .order("name", { ascending: true });
+
+  const [currentFolderResult, folderResult, fileResult] = await Promise.all([
+    currentFolderQuery,
+    folderQuery,
+    fileQuery
+  ]);
+
+  if (currentFolderResult.error || (parentId && !currentFolderResult.data)) {
+    return jsonError("Folder not found", 404);
+  }
+
+  if (folderResult.error) {
+    return jsonError(folderResult.error.message, 500);
+  }
 
   if (fileResult.error) {
     return jsonError(fileResult.error.message, 500);
   }
 
   return NextResponse.json({
-    currentFolder,
+    currentFolder: currentFolderResult.data,
     folders: folderResult.data ?? [],
     files: fileResult.data ?? []
   });
