@@ -19,8 +19,10 @@ export type CloudFile = {
 };
 
 export type PreviewKind =
+  | "document"
   | "image"
   | "pdf"
+  | "spreadsheet"
   | "text"
   | "office"
   | "audio"
