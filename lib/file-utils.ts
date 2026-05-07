@@ -22,11 +22,23 @@ const TEXT_EXTENSIONS = new Set([
 
 const OFFICE_EXTENSIONS = new Set([
   "doc",
-  "docx",
   "ppt",
   "pptx",
-  "xls",
-  "xlsx"
+  "xls"
+]);
+
+const DOCUMENT_EXTENSIONS = new Set([
+  "docx",
+  "docm",
+  "dotx",
+  "dotm"
+]);
+
+const SPREADSHEET_EXTENSIONS = new Set([
+  "xlsx",
+  "xlsm",
+  "xltx",
+  "xltm"
 ]);
 
 export function isUuid(value: string): boolean {
@@ -117,6 +129,20 @@ export function getPreviewKind(mimeType: string, fileName: string): PreviewKind 
 
   if (mime === "application/pdf" || extension === "pdf") {
     return "pdf";
+  }
+
+  if (
+    DOCUMENT_EXTENSIONS.has(extension) ||
+    mime.includes("wordprocessingml")
+  ) {
+    return "document";
+  }
+
+  if (
+    SPREADSHEET_EXTENSIONS.has(extension) ||
+    mime.includes("spreadsheetml")
+  ) {
+    return "spreadsheet";
   }
 
   if (
