@@ -18,6 +18,7 @@ import {
   File,
   FileAudio,
   FileImage,
+  FileSpreadsheet,
   FileText,
   FileVideo,
   Folder,
@@ -31,9 +32,17 @@ import {
   Trash2,
   Upload
 } from "lucide-react";
-import { formatFileSize, getPreviewKind } from "@/lib/file-utils";
+import { CLOUD_BUCKET } from "@/lib/cloud-config";
+import {
+  formatFileSize,
+  getPreviewKind,
+  sanitizeStorageKeyName,
+  sanitizeStorageName
+} from "@/lib/file-utils";
 import { getBrowserSupabase } from "@/lib/supabase/browser";
 import type { CloudFile, Folder as CloudFolder, FolderListing, PreviewKind } from "@/lib/types";
+import { parseDocxPreview, type DocxPreview } from "@/lib/docx-preview";
+import { parseXlsxPreview, type SpreadsheetPreview } from "@/lib/xlsx-preview";
 
 type Breadcrumb = {
   id: string | null;
@@ -45,8 +54,10 @@ type PreviewState =
   | { status: "loading"; file: CloudFile }
   | {
       status: "ready";
+      document?: DocxPreview;
       file: CloudFile;
       kind: PreviewKind;
+      spreadsheet?: SpreadsheetPreview;
       text?: string;
       url: string;
     }
@@ -89,6 +100,42 @@ function formatDate(value: string) {
   }).format(new Date(value));
 }
 
+function sortByName<T extends { name: string }>(items: T[]) {
+  return [...items].sort((a, b) =>
+    a.name.localeCompare(b.name, "ko-KR", {
+      numeric: true,
+      sensitivity: "base"
+    })
+  );
+}
+
+function upsertSortedById<T extends { id: string; name: string }>(items: T[], item: T) {
+  const exists = items.some((current) => current.id === item.id);
+  const next = exists
+    ? items.map((current) => (current.id === item.id ? item : current))
+    : [...items, item];
+
+  return sortByName(next);
+}
+
+function friendlyStorageError(message: string) {
+  const normalized = message.toLowerCase();
+
+  if (normalized.includes("bucket not found") || normalized.includes("not found")) {
+    return "Supabase Storage bucket 'cloud-files'가 없습니다. supabase/schema.sql을 다시 실행하세요.";
+  }
+
+  if (normalized.includes("row-level security") || normalized.includes("violates policy")) {
+    return "Supabase Storage RLS 정책이 업로드를 막고 있습니다. supabase/schema.sql의 storage.objects policy를 다시 실행하세요.";
+  }
+
+  if (normalized.includes("payload too large") || normalized.includes("too large")) {
+    return "파일이 업로드 제한보다 큽니다. supabase/schema.sql을 다시 실행해 bucket 제한을 올리고, Supabase 프로젝트의 Storage 제한도 확인하세요.";
+  }
+
+  return message;
+}
+
 function FileKindIcon({ file }: { file: CloudFile }) {
   const kind = getPreviewKind(file.mime_type, file.name);
 
@@ -104,7 +151,11 @@ function FileKindIcon({ file }: { file: CloudFile }) {
     return <FileVideo aria-hidden="true" />;
   }
 
-  if (kind === "text" || kind === "pdf" || kind === "office") {
+  if (kind === "spreadsheet") {
+    return <FileSpreadsheet aria-hidden="true" />;
+  }
+
+  if (kind === "document" || kind === "text" || kind === "pdf" || kind === "office") {
     return <FileText aria-hidden="true" />;
   }
 
@@ -186,8 +237,7 @@ export function CloudApp() {
         throw new Error("Supabase 환경 변수가 필요합니다.");
       }
 
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
+      const token = session?.access_token;
 
       if (!token) {
         throw new Error("로그인이 필요합니다.");
@@ -201,7 +251,7 @@ export function CloudApp() {
         headers
       });
     },
-    [supabase]
+    [session?.access_token, supabase]
   );
 
   const loadListing = useCallback(
@@ -307,9 +357,9 @@ export function CloudApp() {
         method: "POST"
       });
 
-      await parseApiResponse<{ folder: CloudFolder }>(response);
+      const data = await parseApiResponse<{ folder: CloudFolder }>(response);
       setNewFolderName("");
-      await loadListing(currentFolderId);
+      setFolders((previous) => upsertSortedById(previous, data.folder));
     } catch (error) {
       const message = error instanceof Error ? error.message : "폴더를 만들지 못했습니다.";
       setNotice(message);
@@ -323,27 +373,65 @@ export function CloudApp() {
       return;
     }
 
+    if (!supabase || !session) {
+      setNotice("로그인이 필요합니다.");
+      return;
+    }
+
     const selected = Array.from(fileList);
     setBusyLabel(`${selected.length}개 파일 업로드 중`);
     setNotice(null);
 
     try {
-      for (const file of selected) {
-        const formData = new FormData();
-        formData.append("file", file);
-        if (currentFolderId) {
-          formData.append("folderId", currentFolderId);
+      const uploadedFiles: CloudFile[] = [];
+
+      for (const [index, file] of selected.entries()) {
+        const fileId = crypto.randomUUID();
+        const fileName = sanitizeStorageName(file.name);
+        const storageKeyName = sanitizeStorageKeyName(file.name, fileId);
+        const storagePath = `${session.user.id}/${fileId}/${storageKeyName}`;
+        const mimeType = file.type || "application/octet-stream";
+
+        setBusyLabel(`${index + 1}/${selected.length} 업로드 중`);
+
+        const uploadResult = await supabase.storage
+          .from(CLOUD_BUCKET)
+          .upload(storagePath, file, {
+            contentType: mimeType,
+            upsert: false
+          });
+
+        if (uploadResult.error) {
+          throw new Error(friendlyStorageError(uploadResult.error.message));
         }
 
-        const response = await authFetch("/api/files/upload", {
-          body: formData,
-          method: "POST"
-        });
+        try {
+          const headers = new Headers();
+          headers.set("Content-Type", "application/json");
 
-        await parseApiResponse<{ file: CloudFile }>(response);
+          const response = await authFetch("/api/files/upload", {
+            body: JSON.stringify({
+              folderId: currentFolderId,
+              id: fileId,
+              mimeType,
+              name: fileName,
+              sizeBytes: file.size,
+              storageBucket: CLOUD_BUCKET,
+              storagePath
+            }),
+            headers,
+            method: "POST"
+          });
+
+          const data = await parseApiResponse<{ file: CloudFile }>(response);
+          uploadedFiles.push(data.file);
+        } catch (error) {
+          await supabase.storage.from(CLOUD_BUCKET).remove([storagePath]);
+          throw error;
+        }
       }
 
-      await loadListing(currentFolderId);
+      setFiles((previous) => sortByName([...previous, ...uploadedFiles]));
     } catch (error) {
       const message = error instanceof Error ? error.message : "업로드에 실패했습니다.";
       setNotice(message);
@@ -363,6 +451,8 @@ export function CloudApp() {
     try {
       const response = await authFetch(`/api/files/${file.id}/preview`);
       const data = await parseApiResponse<PreviewResponse>(response);
+      let document: DocxPreview | undefined;
+      let spreadsheet: SpreadsheetPreview | undefined;
       let text: string | undefined;
 
       if (data.kind === "text") {
@@ -373,13 +463,33 @@ export function CloudApp() {
         text = await textResponse.text();
       }
 
+      if (data.kind === "document") {
+        const documentResponse = await fetch(data.url);
+        if (!documentResponse.ok) {
+          throw new Error("Word 내용을 불러오지 못했습니다.");
+        }
+
+        document = await parseDocxPreview(await documentResponse.arrayBuffer());
+      }
+
+      if (data.kind === "spreadsheet") {
+        const spreadsheetResponse = await fetch(data.url);
+        if (!spreadsheetResponse.ok) {
+          throw new Error("Excel 내용을 불러오지 못했습니다.");
+        }
+
+        spreadsheet = await parseXlsxPreview(await spreadsheetResponse.arrayBuffer());
+      }
+
       if (previewRequestRef.current !== requestId) {
         return;
       }
 
       setPreview({
+        document,
         file,
         kind: data.kind,
+        spreadsheet,
         status: "ready",
         text,
         url: data.url
@@ -427,11 +537,13 @@ export function CloudApp() {
         headers,
         method: "PATCH"
       });
-      await parseApiResponse<{ folder: CloudFolder }>(response);
+      const data = await parseApiResponse<{ folder: CloudFolder }>(response);
+      setFolders((previous) => upsertSortedById(previous, data.folder));
       setBreadcrumbs((previous) =>
-        previous.map((crumb) => (crumb.id === folder.id ? { ...crumb, name } : crumb))
+        previous.map((crumb) =>
+          crumb.id === folder.id ? { ...crumb, name: data.folder.name } : crumb
+        )
       );
-      await loadListing(currentFolderId);
     } catch (error) {
       const message = error instanceof Error ? error.message : "폴더 이름을 바꾸지 못했습니다.";
       setNotice(message);
@@ -452,7 +564,7 @@ export function CloudApp() {
         method: "DELETE"
       });
       await parseApiResponse<{ ok: boolean }>(response);
-      await loadListing(currentFolderId);
+      setFolders((previous) => previous.filter((current) => current.id !== folder.id));
     } catch (error) {
       const message = error instanceof Error ? error.message : "폴더를 삭제하지 못했습니다.";
       setNotice(message);
@@ -478,7 +590,7 @@ export function CloudApp() {
         method: "PATCH"
       });
       const data = await parseApiResponse<{ file: CloudFile }>(response);
-      await loadListing(currentFolderId);
+      setFiles((previous) => upsertSortedById(previous, data.file));
       if (preview.file?.id === file.id) {
         void selectFile(data.file);
       }
@@ -505,7 +617,7 @@ export function CloudApp() {
       if (preview.file?.id === file.id) {
         setPreview({ file: null, status: "idle" });
       }
-      await loadListing(currentFolderId);
+      setFiles((previous) => previous.filter((current) => current.id !== file.id));
     } catch (error) {
       const message = error instanceof Error ? error.message : "파일을 삭제하지 못했습니다.";
       setNotice(message);
@@ -931,6 +1043,14 @@ function renderPreview(preview: PreviewState) {
     return <pre className="preview-text">{preview.text}</pre>;
   }
 
+  if (preview.kind === "document") {
+    return <DocxPreviewDocument document={preview.document} />;
+  }
+
+  if (preview.kind === "spreadsheet") {
+    return <SpreadsheetPreviewTable spreadsheet={preview.spreadsheet} />;
+  }
+
   if (preview.kind === "audio") {
     return <audio className="preview-media" controls src={preview.url} />;
   }
@@ -947,4 +1067,80 @@ function renderPreview(preview: PreviewState) {
   }
 
   return <div className="preview-message">미리보기를 지원하지 않는 형식입니다.</div>;
+}
+
+function DocxPreviewDocument({
+  document
+}: {
+  document?: DocxPreview;
+}) {
+  if (!document || document.blocks.length === 0) {
+    return <div className="preview-message">표시할 Word 문서 내용이 없습니다.</div>;
+  }
+
+  return (
+    <div className="preview-document">
+      {document.truncated ? (
+        <div className="document-meta">일부 내용만 표시됩니다.</div>
+      ) : null}
+      {document.blocks.map((block, index) => {
+        if (block.type === "table") {
+          const columnCount = Math.max(1, ...block.rows.map((row) => row.length));
+          const columns = Array.from({ length: columnCount }, (_, columnIndex) => columnIndex);
+
+          return (
+            <table className="document-table" key={index}>
+              <tbody>
+                {block.rows.map((row, rowIndex) => (
+                  <tr key={rowIndex}>
+                    {columns.map((columnIndex) => (
+                      <td key={columnIndex}>{row[columnIndex] ?? ""}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          );
+        }
+
+        return <p key={index}>{block.text}</p>;
+      })}
+    </div>
+  );
+}
+
+function SpreadsheetPreviewTable({
+  spreadsheet
+}: {
+  spreadsheet?: SpreadsheetPreview;
+}) {
+  if (!spreadsheet || spreadsheet.rows.length === 0) {
+    return <div className="preview-message">표시할 Excel 데이터가 없습니다.</div>;
+  }
+
+  const columnCount = Math.max(
+    1,
+    ...spreadsheet.rows.map((row) => row.length)
+  );
+  const columns = Array.from({ length: columnCount }, (_, index) => index);
+
+  return (
+    <div className="preview-spreadsheet">
+      <div className="spreadsheet-meta">
+        <strong>{spreadsheet.sheetName}</strong>
+        {spreadsheet.truncated ? <span>일부 행과 열만 표시됩니다.</span> : null}
+      </div>
+      <table className="spreadsheet-table">
+        <tbody>
+          {spreadsheet.rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {columns.map((columnIndex) => (
+                <td key={columnIndex}>{row[columnIndex] ?? ""}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
