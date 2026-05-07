@@ -1,12 +1,15 @@
-import { createClient, type SupabaseClient, type User } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
-export const CLOUD_BUCKET = "cloud-files";
+export { CLOUD_BUCKET } from "@/lib/cloud-config";
 
 type AuthenticatedContext = {
   supabase: SupabaseClient;
   token: string;
-  user: User;
+  user: {
+    email?: string;
+    id: string;
+  };
 };
 
 type AuthError = {
@@ -64,16 +67,22 @@ export async function requireUser(
     }
   });
 
-  const { data, error } = await supabase.auth.getUser(token);
+  const { data, error } = await supabase.auth.getClaims(token);
 
-  if (error || !data.user) {
+  if (error || !data?.claims?.sub) {
     return { errorResponse: jsonError("Invalid session", 401) };
   }
+
+  const email =
+    typeof data.claims.email === "string" ? data.claims.email : undefined;
 
   return {
     supabase,
     token,
-    user: data.user
+    user: {
+      email,
+      id: data.claims.sub
+    }
   };
 }
 
