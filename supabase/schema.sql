@@ -186,7 +186,7 @@ on public.cloud_files for delete
 using (owner_id = auth.uid());
 
 insert into storage.buckets (id, name, public, file_size_limit)
-values ('cloud-files', 'cloud-files', false, 104857600)
+values ('cloud-files', 'cloud-files', false, 524288000)
 on conflict (id) do update
 set public = excluded.public,
     file_size_limit = excluded.file_size_limit;
