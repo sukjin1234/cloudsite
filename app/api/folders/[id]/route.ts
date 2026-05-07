@@ -57,19 +57,20 @@ export async function DELETE(request: Request, { params }: Params) {
     return jsonError("Invalid folder id", 400);
   }
 
-  const childFolders = await context.supabase
-    .from("cloud_folders")
-    .select("id", { count: "exact", head: true })
-    .eq("parent_id", params.id);
+  const [childFolders, childFiles] = await Promise.all([
+    context.supabase
+      .from("cloud_folders")
+      .select("id", { count: "exact", head: true })
+      .eq("parent_id", params.id),
+    context.supabase
+      .from("cloud_files")
+      .select("id", { count: "exact", head: true })
+      .eq("folder_id", params.id)
+  ]);
 
   if (childFolders.error) {
     return jsonError(childFolders.error.message, 500);
   }
-
-  const childFiles = await context.supabase
-    .from("cloud_files")
-    .select("id", { count: "exact", head: true })
-    .eq("folder_id", params.id);
 
   if (childFiles.error) {
     return jsonError(childFiles.error.message, 500);
