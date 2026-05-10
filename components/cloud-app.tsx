@@ -86,9 +86,14 @@ const PREVIEW_WIDTH_STORAGE_KEY = "personal-cloud-preview-width";
 const DEFAULT_PREVIEW_WIDTH = 420;
 const MIN_PREVIEW_WIDTH = 320;
 const MAX_PREVIEW_WIDTH = 760;
+const ROOT_DROP_TARGET_KEY = "root";
 
 function clampPreviewWidth(value: number) {
   return Math.min(MAX_PREVIEW_WIDTH, Math.max(MIN_PREVIEW_WIDTH, value));
+}
+
+function getDropTargetKey(folderId: string | null) {
+  return folderId ?? ROOT_DROP_TARGET_KEY;
 }
 
 async function parseApiResponse<T>(response: Response): Promise<T> {
@@ -205,7 +210,7 @@ export function CloudApp() {
     status: "idle"
   });
   const [draggedFileId, setDraggedFileId] = useState<string | null>(null);
-  const [dropTargetFolderId, setDropTargetFolderId] = useState<string | null>(null);
+  const [dropTargetKey, setDropTargetKey] = useState<string | null>(null);
   const [previewWidth, setPreviewWidth] = useState(DEFAULT_PREVIEW_WIDTH);
   const [resizingPreview, setResizingPreview] = useState(false);
 
@@ -696,9 +701,9 @@ export function CloudApp() {
     }
   }
 
-  async function moveFileToFolder(fileId: string, folder: CloudFolder) {
+  async function moveFileToFolder(fileId: string, targetFolderId: string | null) {
     const file = files.find((current) => current.id === fileId);
-    if (!file || file.folder_id === folder.id) {
+    if (!file || file.folder_id === targetFolderId) {
       return;
     }
 
@@ -709,7 +714,7 @@ export function CloudApp() {
       const headers = new Headers();
       headers.set("Content-Type", "application/json");
       const response = await authFetch(`/api/files/${fileId}`, {
-        body: JSON.stringify({ folderId: folder.id }),
+        body: JSON.stringify({ folderId: targetFolderId }),
         headers,
         method: "PATCH"
       });
@@ -751,10 +756,10 @@ export function CloudApp() {
 
   function handleFileDragEnd() {
     setDraggedFileId(null);
-    setDropTargetFolderId(null);
+    setDropTargetKey(null);
   }
 
-  function handleFolderDragOver(event: DragEvent<HTMLElement>, folder: CloudFolder) {
+  function handleFolderDragOver(event: DragEvent<HTMLElement>, targetFolderId: string | null) {
     if (busyLabel || !hasFolderDropData(event)) {
       return;
     }
@@ -763,35 +768,36 @@ export function CloudApp() {
     event.dataTransfer.dropEffect = Array.from(event.dataTransfer.types).includes("Files")
       ? "copy"
       : "move";
-    setDropTargetFolderId(folder.id);
+    setDropTargetKey(getDropTargetKey(targetFolderId));
   }
 
-  function handleFolderDragLeave(event: DragEvent<HTMLElement>, folder: CloudFolder) {
+  function handleFolderDragLeave(event: DragEvent<HTMLElement>, targetFolderId: string | null) {
     const nextTarget = event.relatedTarget;
     if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
       return;
     }
 
-    setDropTargetFolderId((current) => (current === folder.id ? null : current));
+    const targetKey = getDropTargetKey(targetFolderId);
+    setDropTargetKey((current) => (current === targetKey ? null : current));
   }
 
-  async function handleFolderDrop(event: DragEvent<HTMLElement>, folder: CloudFolder) {
+  async function handleFolderDrop(event: DragEvent<HTMLElement>, targetFolderId: string | null) {
     if (busyLabel || !hasFolderDropData(event)) {
       return;
     }
 
     event.preventDefault();
     event.stopPropagation();
-    setDropTargetFolderId(null);
+    setDropTargetKey(null);
 
     const appFileId = event.dataTransfer.getData(FILE_DRAG_DATA_TYPE);
     if (appFileId) {
-      await moveFileToFolder(appFileId, folder);
+      await moveFileToFolder(appFileId, targetFolderId);
       return;
     }
 
     if (event.dataTransfer.files.length > 0) {
-      await uploadFiles(event.dataTransfer.files, folder.id);
+      await uploadFiles(event.dataTransfer.files, targetFolderId);
     }
   }
 
@@ -978,6 +984,12 @@ export function CloudApp() {
               <span className="breadcrumb-item" key={`${crumb.id ?? "root"}-${index}`}>
                 {index > 0 ? <ChevronRight aria-hidden="true" /> : null}
                 <button
+                  className={
+                    dropTargetKey === getDropTargetKey(crumb.id) ? "drop-target" : undefined
+                  }
+                  onDragLeave={(event) => handleFolderDragLeave(event, crumb.id)}
+                  onDragOver={(event) => handleFolderDragOver(event, crumb.id)}
+                  onDrop={(event) => void handleFolderDrop(event, crumb.id)}
                   onClick={() => {
                     setPreview({ file: null, status: "idle" });
                     setBreadcrumbs((previous) => previous.slice(0, index + 1));
@@ -1057,12 +1069,12 @@ export function CloudApp() {
               {filteredFolders.map((folder) => (
                 <article
                   className={`item-tile folder-tile ${
-                    dropTargetFolderId === folder.id ? "drop-target" : ""
+                    dropTargetKey === getDropTargetKey(folder.id) ? "drop-target" : ""
                   }`}
                   key={folder.id}
-                  onDragLeave={(event) => handleFolderDragLeave(event, folder)}
-                  onDragOver={(event) => handleFolderDragOver(event, folder)}
-                  onDrop={(event) => void handleFolderDrop(event, folder)}
+                  onDragLeave={(event) => handleFolderDragLeave(event, folder.id)}
+                  onDragOver={(event) => handleFolderDragOver(event, folder.id)}
+                  onDrop={(event) => void handleFolderDrop(event, folder.id)}
                 >
                   <button
                     className="tile-main"

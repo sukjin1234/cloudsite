@@ -403,6 +403,12 @@ body.preview-resizing * {
   color: var(--teal);
 }
 
+.breadcrumb-item button.drop-target {
+  background: #f0fdfa;
+  box-shadow: inset 0 0 0 1px var(--teal);
+  color: var(--teal);
+}
+
 .toolbar {
   align-items: center;
   display: flex;
