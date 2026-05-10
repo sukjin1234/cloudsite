@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { isUuid, validateDisplayName } from "@/lib/file-utils";
+import {
+  isUuid,
+  normalizeOptionalUuid,
+  validateDisplayName
+} from "@/lib/file-utils";
 import { isAuthError, jsonError, requireUser } from "@/lib/supabase/route";
 
 const FILE_SELECT =
@@ -22,21 +26,42 @@ export async function PATCH(request: Request, { params }: Params) {
   }
 
   const payload = await request.json().catch(() => null);
-  let name: string;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return jsonError("Invalid file", 400);
+  }
 
-  try {
-    name = validateDisplayName(payload?.name, {
-      label: "File name",
-      maxLength: 180
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Invalid file";
-    return jsonError(message, 400);
+  const updates: {
+    folder_id?: string | null;
+    name?: string;
+  } = {};
+
+  if ("name" in payload) {
+    try {
+      updates.name = validateDisplayName(payload.name, {
+        label: "File name",
+        maxLength: 180
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Invalid file";
+      return jsonError(message, 400);
+    }
+  }
+
+  if ("folderId" in payload) {
+    try {
+      updates.folder_id = normalizeOptionalUuid(payload.folderId);
+    } catch {
+      return jsonError("Invalid folder", 400);
+    }
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return jsonError("No file changes provided", 400);
   }
 
   const { data, error } = await context.supabase
     .from("cloud_files")
-    .update({ name })
+    .update(updates)
     .eq("id", params.id)
     .select(FILE_SELECT)
     .single();

@@ -1,9 +1,12 @@
 "use client";
 
 import {
+  type CSSProperties,
   type ChangeEvent,
+  type DragEvent,
   type FormEvent,
   type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -77,6 +80,16 @@ const ROOT_BREADCRUMB: Breadcrumb = {
   id: null,
   name: "내 드라이브"
 };
+
+const FILE_DRAG_DATA_TYPE = "application/x-personal-cloud-file-id";
+const PREVIEW_WIDTH_STORAGE_KEY = "personal-cloud-preview-width";
+const DEFAULT_PREVIEW_WIDTH = 420;
+const MIN_PREVIEW_WIDTH = 320;
+const MAX_PREVIEW_WIDTH = 760;
+
+function clampPreviewWidth(value: number) {
+  return Math.min(MAX_PREVIEW_WIDTH, Math.max(MIN_PREVIEW_WIDTH, value));
+}
 
 async function parseApiResponse<T>(response: Response): Promise<T> {
   const payload = (await response.json().catch(() => ({}))) as T & {
@@ -191,11 +204,63 @@ export function CloudApp() {
     file: null,
     status: "idle"
   });
+  const [draggedFileId, setDraggedFileId] = useState<string | null>(null);
+  const [dropTargetFolderId, setDropTargetFolderId] = useState<string | null>(null);
+  const [previewWidth, setPreviewWidth] = useState(DEFAULT_PREVIEW_WIDTH);
+  const [resizingPreview, setResizingPreview] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const previewRequestRef = useRef(0);
+  const previewResizeRef = useRef<{
+    startWidth: number;
+    startX: number;
+  } | null>(null);
 
   const currentFolderId = breadcrumbs[breadcrumbs.length - 1]?.id ?? null;
+
+  useEffect(() => {
+    const storedWidth = window.localStorage.getItem(PREVIEW_WIDTH_STORAGE_KEY);
+    const parsedWidth = storedWidth ? Number(storedWidth) : Number.NaN;
+
+    if (Number.isFinite(parsedWidth)) {
+      setPreviewWidth(clampPreviewWidth(parsedWidth));
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(PREVIEW_WIDTH_STORAGE_KEY, String(previewWidth));
+  }, [previewWidth]);
+
+  useEffect(() => {
+    if (!resizingPreview) {
+      return;
+    }
+
+    function handlePointerMove(event: PointerEvent) {
+      const resizeState = previewResizeRef.current;
+      if (!resizeState) {
+        return;
+      }
+
+      const nextWidth = resizeState.startWidth + resizeState.startX - event.clientX;
+      setPreviewWidth(clampPreviewWidth(nextWidth));
+    }
+
+    function handlePointerUp() {
+      previewResizeRef.current = null;
+      setResizingPreview(false);
+    }
+
+    document.body.classList.add("preview-resizing");
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+
+    return () => {
+      document.body.classList.remove("preview-resizing");
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [resizingPreview]);
 
   useEffect(() => {
     if (!supabase) {
@@ -368,7 +433,10 @@ export function CloudApp() {
     }
   }
 
-  async function uploadFiles(fileList: FileList | null) {
+  async function uploadFiles(
+    fileList: FileList | null,
+    targetFolderId: string | null = currentFolderId
+  ) {
     if (!fileList?.length) {
       return;
     }
@@ -411,7 +479,7 @@ export function CloudApp() {
 
           const response = await authFetch("/api/files/upload", {
             body: JSON.stringify({
-              folderId: currentFolderId,
+              folderId: targetFolderId,
               id: fileId,
               mimeType,
               name: fileName,
@@ -431,7 +499,9 @@ export function CloudApp() {
         }
       }
 
-      setFiles((previous) => sortByName([...previous, ...uploadedFiles]));
+      if (targetFolderId === currentFolderId) {
+        setFiles((previous) => sortByName([...previous, ...uploadedFiles]));
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "업로드에 실패했습니다.";
       setNotice(message);
@@ -626,6 +696,114 @@ export function CloudApp() {
     }
   }
 
+  async function moveFileToFolder(fileId: string, folder: CloudFolder) {
+    const file = files.find((current) => current.id === fileId);
+    if (!file || file.folder_id === folder.id) {
+      return;
+    }
+
+    setBusyLabel("파일 이동 중");
+    setNotice(null);
+
+    try {
+      const headers = new Headers();
+      headers.set("Content-Type", "application/json");
+      const response = await authFetch(`/api/files/${fileId}`, {
+        body: JSON.stringify({ folderId: folder.id }),
+        headers,
+        method: "PATCH"
+      });
+      const data = await parseApiResponse<{ file: CloudFile }>(response);
+
+      setFiles((previous) =>
+        data.file.folder_id === currentFolderId
+          ? upsertSortedById(previous, data.file)
+          : previous.filter((current) => current.id !== fileId)
+      );
+
+      if (preview.file?.id === fileId) {
+        setPreview({ file: null, status: "idle" });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "파일을 이동하지 못했습니다.";
+      setNotice(message);
+    } finally {
+      setBusyLabel(null);
+    }
+  }
+
+  function hasFolderDropData(event: DragEvent<HTMLElement>) {
+    const types = Array.from(event.dataTransfer.types);
+    return types.includes(FILE_DRAG_DATA_TYPE) || types.includes("Files");
+  }
+
+  function handleFileDragStart(event: DragEvent<HTMLElement>, file: CloudFile) {
+    if (busyLabel) {
+      event.preventDefault();
+      return;
+    }
+
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(FILE_DRAG_DATA_TYPE, file.id);
+    event.dataTransfer.setData("text/plain", file.name);
+    setDraggedFileId(file.id);
+  }
+
+  function handleFileDragEnd() {
+    setDraggedFileId(null);
+    setDropTargetFolderId(null);
+  }
+
+  function handleFolderDragOver(event: DragEvent<HTMLElement>, folder: CloudFolder) {
+    if (busyLabel || !hasFolderDropData(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = Array.from(event.dataTransfer.types).includes("Files")
+      ? "copy"
+      : "move";
+    setDropTargetFolderId(folder.id);
+  }
+
+  function handleFolderDragLeave(event: DragEvent<HTMLElement>, folder: CloudFolder) {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+
+    setDropTargetFolderId((current) => (current === folder.id ? null : current));
+  }
+
+  async function handleFolderDrop(event: DragEvent<HTMLElement>, folder: CloudFolder) {
+    if (busyLabel || !hasFolderDropData(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    setDropTargetFolderId(null);
+
+    const appFileId = event.dataTransfer.getData(FILE_DRAG_DATA_TYPE);
+    if (appFileId) {
+      await moveFileToFolder(appFileId, folder);
+      return;
+    }
+
+    if (event.dataTransfer.files.length > 0) {
+      await uploadFiles(event.dataTransfer.files, folder.id);
+    }
+  }
+
+  function startPreviewResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    previewResizeRef.current = {
+      startWidth: previewWidth,
+      startX: event.clientX
+    };
+    setResizingPreview(true);
+  }
+
   function openFolder(folder: CloudFolder) {
     setPreview({ file: null, status: "idle" });
     setQuery("");
@@ -721,7 +899,10 @@ export function CloudApp() {
   }
 
   return (
-    <main className="app-shell">
+    <main
+      className={`app-shell ${resizingPreview ? "is-resizing-preview" : ""}`}
+      style={{ "--preview-width": `${previewWidth}px` } as CSSProperties}
+    >
       <input
         multiple
         onChange={(event: ChangeEvent<HTMLInputElement>) => void uploadFiles(event.target.files)}
@@ -874,7 +1055,15 @@ export function CloudApp() {
           ) : (
             <div className="items-grid">
               {filteredFolders.map((folder) => (
-                <article className="item-tile folder-tile" key={folder.id}>
+                <article
+                  className={`item-tile folder-tile ${
+                    dropTargetFolderId === folder.id ? "drop-target" : ""
+                  }`}
+                  key={folder.id}
+                  onDragLeave={(event) => handleFolderDragLeave(event, folder)}
+                  onDragOver={(event) => handleFolderDragOver(event, folder)}
+                  onDrop={(event) => void handleFolderDrop(event, folder)}
+                >
                   <button
                     className="tile-main"
                     onClick={() => openFolder(folder)}
@@ -914,8 +1103,13 @@ export function CloudApp() {
 
               {filteredFiles.map((file) => (
                 <article
-                  className={`item-tile ${preview.file?.id === file.id ? "selected" : ""}`}
+                  className={`item-tile file-tile ${
+                    preview.file?.id === file.id ? "selected" : ""
+                  } ${draggedFileId === file.id ? "dragging" : ""}`}
+                  draggable={!busyLabel}
                   key={file.id}
+                  onDragEnd={handleFileDragEnd}
+                  onDragStart={(event) => handleFileDragStart(event, file)}
                 >
                   <button
                     className="tile-main"
@@ -971,6 +1165,7 @@ export function CloudApp() {
 
       <PreviewPanel
         onDownload={(file) => void downloadFile(file)}
+        onResizePointerDown={startPreviewResize}
         preview={preview}
       />
     </main>
@@ -979,15 +1174,24 @@ export function CloudApp() {
 
 function PreviewPanel({
   onDownload,
+  onResizePointerDown,
   preview
 }: {
   onDownload: (file: CloudFile) => void;
+  onResizePointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   preview: PreviewState;
 }) {
   const file = preview.file;
 
   return (
     <aside className="preview-panel">
+      <button
+        aria-label="미리보기 너비 조절"
+        className="preview-resizer"
+        onPointerDown={onResizePointerDown}
+        title="미리보기 너비 조절"
+        type="button"
+      />
       <div className="preview-header">
         <div>
           <span>미리보기</span>
