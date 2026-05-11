@@ -71,11 +71,6 @@ type PreviewResponse = {
   url: string;
 };
 
-type DownloadResponse = {
-  fileName: string;
-  url: string;
-};
-
 const ROOT_BREADCRUMB: Breadcrumb = {
   id: null,
   name: "내 드라이브"
@@ -581,13 +576,19 @@ export function CloudApp() {
 
     try {
       const response = await authFetch(`/api/files/${file.id}/download`);
-      const data = await parseApiResponse<DownloadResponse>(response);
+      if (!response.ok) {
+        await parseApiResponse<never>(response);
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
-      anchor.href = data.url;
-      anchor.download = data.fileName;
+      anchor.href = url;
+      anchor.download = file.name;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (error) {
       const message = error instanceof Error ? error.message : "다운로드를 시작하지 못했습니다.";
       setNotice(message);

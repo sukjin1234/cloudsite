@@ -10,6 +10,30 @@ type Params = {
   };
 };
 
+const DOWNLOAD_URL_TTL_SECONDS = 60;
+
+function encodeRFC5987Value(value: string) {
+  return encodeURIComponent(value).replace(/['()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+}
+
+function getAsciiFilenameFallback(fileName: string) {
+  const fallback = fileName
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\x20-\x7e]/g, "_")
+    .replace(/["\\;\r\n]/g, "_")
+    .trim();
+
+  return fallback || "download";
+}
+
+function getContentDisposition(fileName: string) {
+  const fallback = getAsciiFilenameFallback(fileName);
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeRFC5987Value(fileName)}`;
+}
+
 export async function GET(request: Request, { params }: Params) {
   const context = await requireUser(request);
   if (isAuthError(context)) {
@@ -32,17 +56,32 @@ export async function GET(request: Request, { params }: Params) {
 
   const signed = await context.supabase.storage
     .from(file.storage_bucket)
-    .createSignedUrl(file.storage_path, 60, {
-      download: file.name
-    });
+    .createSignedUrl(file.storage_path, DOWNLOAD_URL_TTL_SECONDS);
 
   if (signed.error || !signed.data?.signedUrl) {
     return jsonError(signed.error?.message ?? "Could not create download URL", 400);
   }
 
-  return Response.json({
-    expiresIn: 60,
-    fileName: file.name,
-    url: signed.data.signedUrl
-  });
+  const storageResponse = await fetch(signed.data.signedUrl);
+
+  if (!storageResponse.ok || !storageResponse.body) {
+    return jsonError("Could not fetch file from storage", storageResponse.status || 400);
+  }
+
+  const headers = new Headers();
+  const contentLength = storageResponse.headers.get("Content-Length");
+
+  headers.set(
+    "Content-Type",
+    file.mime_type || storageResponse.headers.get("Content-Type") || "application/octet-stream"
+  );
+  headers.set("Content-Disposition", getContentDisposition(file.name));
+  headers.set("Cache-Control", "private, max-age=0, must-revalidate");
+  headers.set("X-Content-Type-Options", "nosniff");
+
+  if (contentLength) {
+    headers.set("Content-Length", contentLength);
+  }
+
+  return new Response(storageResponse.body, { headers });
 }
