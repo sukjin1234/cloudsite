@@ -14,8 +14,20 @@ services:
       MYSQL_DATABASE: personal_cloud
       SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
       UPLOAD_DIR: /app/uploads
-    ports:
-      - "${APP_PORT:-3001}:3000"
+    caddy:
+      image: caddy:2.11.7-alpine
+      restart: unless-stopped
+      depends_on:
+        - app
+      environment:
+        SERVER_PUBLIC_IP: ${SERVER_PUBLIC_IP:?Set SERVER_PUBLIC_IP in .env}
+      ports:
+        - "80:80"
+        - "443:443"
+      volumes:
+        - ./Caddyfile:/etc/caddy/Caddyfile:ro
+        - caddy_data:/data
+        - caddy_config:/config
     volumes:
       - uploads:/app/uploads
 
@@ -41,3 +53,5 @@ services:
 volumes:
   mysql_data:
   uploads:
+  caddy_data:
+  caddy_config:
