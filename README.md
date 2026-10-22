@@ -11,29 +11,50 @@ Next.js, MySQL, 서버 파일 저장소를 사용하는 개인용 파일 보관 
 - 파일 및 폴더를 계정별로 분리
 - 500MB까지 스트리밍 업로드와 다운로드
 
-## Docker 실행
+## Docker 배포 (공인 IP, HTTPS)
 
-Docker Desktop을 설치하고 실행한 뒤, 프로젝트 폴더의 PowerShell에서 `.env`를 준비합니다.
+이 구성은 OCI 등 Linux 서버에서 Caddy가 HTTPS를 받고, 앱과 MySQL은 Docker 내부 네트워크에서 실행합니다. 앱 포트와 MySQL 포트는 외부에 공개하지 않습니다.
 
-```powershell
-Copy-Item .env.docker.example .env
+서버에서 프로젝트 폴더로 이동하고 `.env`를 준비합니다.
+
+```bash
+cd /opt/cloudsite
+if [ ! -f .env ]; then cp .env.docker.example .env; fi
+nano .env
 ```
 
-`.env`를 열어 `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD`, `SESSION_SECRET`에 서로 다른 무작위 값을 입력합니다. 각 값은 아래 명령으로 생성할 수 있습니다.
+`.env`에 OCI에서 확인한 공인 IPv4와 서로 다른 무작위 비밀번호 및 세션 키를 입력합니다.
 
-```powershell
-node -e "console.log(require('node:crypto').randomBytes(48).toString('hex'))"
+```env
+SERVER_PUBLIC_IP=실제_공인_IP
+MYSQL_ROOT_PASSWORD=충분히_긴_무작위_값
+MYSQL_PASSWORD=다른_충분히_긴_무작위_값
+SESSION_SECRET=충분히_긴_무작위_값
 ```
 
-세 값을 채운 후 앱과 MySQL을 빌드하고 실행합니다.
+무작위 값은 아래 명령을 각각 실행해 만들 수 있습니다.
 
-```powershell
-docker compose up --build -d
+```bash
+openssl rand -hex 48
 ```
 
-처음 실행할 때 MySQL 데이터베이스와 테이블을 만들고, 앱은 `http://localhost:3001`에서 엽니다. 기본 포트 `3001`은 이미 사용 중이면 `.env`의 `APP_PORT`를 다른 포트로 바꿉니다. 데이터베이스와 업로드 파일은 Docker 볼륨에 저장되어 컨테이너를 내려도 유지됩니다. 상태와 로그는 `docker compose ps`, `docker compose logs -f`로 확인하고, `docker compose down`으로 중지합니다. `down -v`는 데이터 볼륨을 삭제하므로 데이터가 필요하면 사용하지 마세요.
+OCI 보안 규칙과 서버 방화벽에서 TCP 80 및 443을 허용한 뒤 설정을 확인하고 실행합니다.
 
-이 구성은 기존 PC에 설치한 MySQL과 별도의 Docker MySQL을 사용합니다. 기존 DB 데이터를 옮기지 않으면 Docker DB는 새 데이터로 시작합니다.
+```bash
+docker compose config
+docker compose up -d --build
+```
+
+브라우저에서 `https://공인_IP`로 접속합니다. Caddy 상태는 `docker compose ps`, 발급 및 갱신 로그는 `docker compose logs -f caddy`로 확인합니다. 앱은 Caddy 뒤에서만 연결되고, 3001 및 3306 포트를 외부에 열지 마세요. 공인 IP용 인증서는 짧은 기간으로 발급되며 Caddy가 자동 갱신하므로 `caddy_data` 볼륨을 유지해야 합니다.
+
+데이터베이스와 업로드 파일은 Docker 볼륨에 보관됩니다. 컨테이너 중지는 `docker compose down`을 사용하세요. `docker compose down -v`는 MySQL, 업로드, Caddy 인증서 볼륨까지 삭제하므로 데이터가 필요하면 사용하지 마세요.
+
+로컬 개발은 아래 명령으로 실행합니다.
+
+```bash
+npm install
+npm run dev
+```
 
 ## MySQL 설정
 

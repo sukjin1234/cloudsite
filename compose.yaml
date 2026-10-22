@@ -14,22 +14,23 @@ services:
       MYSQL_DATABASE: personal_cloud
       SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
       UPLOAD_DIR: /app/uploads
-    caddy:
-      image: caddy:2.11.7-alpine
-      restart: unless-stopped
-      depends_on:
-        - app
-      environment:
-        SERVER_PUBLIC_IP: ${SERVER_PUBLIC_IP:?Set SERVER_PUBLIC_IP in .env}
-      ports:
-        - "80:80"
-        - "443:443"
-      volumes:
-        - ./Caddyfile:/etc/caddy/Caddyfile:ro
-        - caddy_data:/data
-        - caddy_config:/config
     volumes:
       - uploads:/app/uploads
+
+  caddy:
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      SERVER_PUBLIC_IP: ${SERVER_PUBLIC_IP:?Set SERVER_PUBLIC_IP in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
 
   db:
     image: mysql:8.4
@@ -51,7 +52,7 @@ services:
       start_period: 20s
 
 volumes:
-  mysql_data:
-  uploads:
-  caddy_data:
-  caddy_config:
+  mysql_data: {}
+  uploads: {}
+  caddy_data: {}
+  caddy_config: {}
