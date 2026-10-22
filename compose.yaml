@@ -1,0 +1,43 @@
+services:
+  app:
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: db
+      MYSQL_PORT: "3306"
+      MYSQL_USER: cloudsite
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      MYSQL_DATABASE: personal_cloud
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+      UPLOAD_DIR: /app/uploads
+    ports:
+      - "${APP_PORT:-3001}:3000"
+    volumes:
+      - uploads:/app/uploads
+
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: personal_cloud
+      MYSQL_USER: cloudsite
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+      - ./mysql/docker-app-privileges.sql:/docker-entrypoint-initdb.d/002-app-privileges.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+volumes:
+  mysql_data:
+  uploads:
