@@ -13,10 +13,9 @@ import {
   useRef,
   useState
 } from "react";
-import type { Session } from "@supabase/supabase-js";
+import Image from "next/image";
 import {
   ChevronRight,
-  Cloud,
   Download,
   File,
   FileAudio,
@@ -35,14 +34,7 @@ import {
   Trash2,
   Upload
 } from "lucide-react";
-import { CLOUD_BUCKET } from "@/lib/cloud-config";
-import {
-  formatFileSize,
-  getPreviewKind,
-  sanitizeStorageKeyName,
-  sanitizeStorageName
-} from "@/lib/file-utils";
-import { getBrowserSupabase } from "@/lib/supabase/browser";
+import { formatFileSize, getPreviewKind, sanitizeStorageName } from "@/lib/file-utils";
 import type { CloudFile, Folder as CloudFolder, FolderListing, PreviewKind } from "@/lib/types";
 import { parseDocxPreview, type DocxPreview } from "@/lib/docx-preview";
 import { parseXlsxPreview, type SpreadsheetPreview } from "@/lib/xlsx-preview";
@@ -69,6 +61,11 @@ type PreviewState =
 type PreviewResponse = {
   kind: PreviewKind;
   url: string;
+};
+
+type CloudUser = {
+  id: string;
+  email: string;
 };
 
 const ROOT_BREADCRUMB: Breadcrumb = {
@@ -131,24 +128,6 @@ function upsertSortedById<T extends { id: string; name: string }>(items: T[], it
   return sortByName(next);
 }
 
-function friendlyStorageError(message: string) {
-  const normalized = message.toLowerCase();
-
-  if (normalized.includes("bucket not found") || normalized.includes("not found")) {
-    return "Supabase Storage bucket 'cloud-files'가 없습니다. supabase/schema.sql을 다시 실행하세요.";
-  }
-
-  if (normalized.includes("row-level security") || normalized.includes("violates policy")) {
-    return "Supabase Storage RLS 정책이 업로드를 막고 있습니다. supabase/schema.sql의 storage.objects policy를 다시 실행하세요.";
-  }
-
-  if (normalized.includes("payload too large") || normalized.includes("too large")) {
-    return "파일이 업로드 제한보다 큽니다. supabase/schema.sql을 다시 실행해 bucket 제한을 올리고, Supabase 프로젝트의 Storage 제한도 확인하세요.";
-  }
-
-  return message;
-}
-
 function FileKindIcon({ file }: { file: CloudFile }) {
   const kind = getPreviewKind(file.mime_type, file.name);
 
@@ -176,15 +155,7 @@ function FileKindIcon({ file }: { file: CloudFile }) {
 }
 
 export function CloudApp() {
-  const supabase = useMemo(() => {
-    try {
-      return getBrowserSupabase();
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<CloudUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authMode, setAuthMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
@@ -263,60 +234,53 @@ export function CloudApp() {
   }, [resizingPreview]);
 
   useEffect(() => {
-    if (!supabase) {
-      setAuthLoading(false);
-      return;
-    }
-
     let mounted = true;
 
-    supabase.auth.getSession().then(({ data }) => {
-      if (mounted) {
-        setSession(data.session);
-        setAuthLoading(false);
-      }
-    });
-
-    const {
-      data: { subscription }
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
-      setAuthLoading(false);
-      if (!nextSession) {
-        setBreadcrumbs([ROOT_BREADCRUMB]);
-        setFolders([]);
-        setFiles([]);
-        setPreview({ file: null, status: "idle" });
-      }
-    });
+    fetch("/api/auth/me")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: { user?: CloudUser } | null) => {
+        if (mounted) {
+          setSession(data?.user ?? null);
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setSession(null);
+        }
+      })
+      .finally(() => {
+        if (mounted) {
+          setAuthLoading(false);
+        }
+      });
 
     return () => {
       mounted = false;
-      subscription.unsubscribe();
     };
-  }, [supabase]);
+  }, []);
+
+  useEffect(() => {
+    if (session) {
+      return;
+    }
+    setBreadcrumbs([ROOT_BREADCRUMB]);
+    setFolders([]);
+    setFiles([]);
+    setPreview({ file: null, status: "idle" });
+  }, [session]);
 
   const authFetch = useCallback(
     async (input: RequestInfo | URL, init: RequestInit = {}) => {
-      if (!supabase) {
-        throw new Error("Supabase 환경 변수가 필요합니다.");
-      }
-
-      const token = session?.access_token;
-
-      if (!token) {
-        throw new Error("로그인이 필요합니다.");
-      }
-
-      const headers = new Headers(init.headers);
-      headers.set("Authorization", `Bearer ${token}`);
-
-      return fetch(input, {
+      const response = await fetch(input, {
         ...init,
-        headers
+        credentials: "same-origin"
       });
+      if (response.status === 401) {
+        setSession(null);
+      }
+      return response;
     },
-    [session?.access_token, supabase]
+    []
   );
 
   const loadListing = useCallback(
@@ -370,33 +334,31 @@ export function CloudApp() {
 
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!supabase) {
-      return;
-    }
-
     setAuthSubmitting(true);
     setAuthMessage(null);
 
-    const result =
-      authMode === "login"
-        ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password });
-
-    if (result.error) {
-      setAuthMessage(result.error.message);
-    } else if (authMode === "signup" && !result.data.session) {
-      setAuthMessage("가입 확인 메일을 확인하세요.");
+    try {
+      const response = await fetch(`/api/auth/${authMode}`, {
+        body: JSON.stringify({ email, password }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST"
+      });
+      const data = await parseApiResponse<{ user: CloudUser }>(response);
+      setSession(data.user);
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "로그인하지 못했습니다.");
+    } finally {
+      setAuthSubmitting(false);
     }
-
-    setAuthSubmitting(false);
   }
 
   async function handleSignOut() {
-    if (!supabase) {
-      return;
-    }
-
-    await supabase.auth.signOut();
+    await fetch("/api/auth/logout", { method: "POST" });
+    setSession(null);
+    setBreadcrumbs([ROOT_BREADCRUMB]);
+    setFolders([]);
+    setFiles([]);
+    setPreview({ file: null, status: "idle" });
   }
 
   async function createFolder(event: FormEvent<HTMLFormElement>) {
@@ -441,7 +403,7 @@ export function CloudApp() {
       return;
     }
 
-    if (!supabase || !session) {
+    if (!session) {
       setNotice("로그인이 필요합니다.");
       return;
     }
@@ -454,49 +416,19 @@ export function CloudApp() {
       const uploadedFiles: CloudFile[] = [];
 
       for (const [index, file] of selected.entries()) {
-        const fileId = crypto.randomUUID();
         const fileName = sanitizeStorageName(file.name);
-        const storageKeyName = sanitizeStorageKeyName(file.name, fileId);
-        const storagePath = `${session.user.id}/${fileId}/${storageKeyName}`;
-        const mimeType = file.type || "application/octet-stream";
-
         setBusyLabel(`${index + 1}/${selected.length} 업로드 중`);
 
-        const uploadResult = await supabase.storage
-          .from(CLOUD_BUCKET)
-          .upload(storagePath, file, {
-            contentType: mimeType,
-            upsert: false
-          });
+        const body = new FormData();
+        body.set("folderId", targetFolderId ?? "");
+        body.set("file", file, fileName);
 
-        if (uploadResult.error) {
-          throw new Error(friendlyStorageError(uploadResult.error.message));
-        }
-
-        try {
-          const headers = new Headers();
-          headers.set("Content-Type", "application/json");
-
-          const response = await authFetch("/api/files/upload", {
-            body: JSON.stringify({
-              folderId: targetFolderId,
-              id: fileId,
-              mimeType,
-              name: fileName,
-              sizeBytes: file.size,
-              storageBucket: CLOUD_BUCKET,
-              storagePath
-            }),
-            headers,
-            method: "POST"
-          });
-
-          const data = await parseApiResponse<{ file: CloudFile }>(response);
-          uploadedFiles.push(data.file);
-        } catch (error) {
-          await supabase.storage.from(CLOUD_BUCKET).remove([storagePath]);
-          throw error;
-        }
+        const response = await authFetch("/api/files/upload", {
+          body,
+          method: "POST"
+        });
+        const data = await parseApiResponse<{ file: CloudFile }>(response);
+        uploadedFiles.push(data.file);
       }
 
       if (targetFolderId === currentFolderId) {
@@ -526,7 +458,7 @@ export function CloudApp() {
       let text: string | undefined;
 
       if (data.kind === "text") {
-        const textResponse = await fetch(data.url);
+        const textResponse = await authFetch(data.url);
         if (!textResponse.ok) {
           throw new Error("문서 내용을 불러오지 못했습니다.");
         }
@@ -534,7 +466,7 @@ export function CloudApp() {
       }
 
       if (data.kind === "document") {
-        const documentResponse = await fetch(data.url);
+        const documentResponse = await authFetch(data.url);
         if (!documentResponse.ok) {
           throw new Error("Word 내용을 불러오지 못했습니다.");
         }
@@ -543,7 +475,7 @@ export function CloudApp() {
       }
 
       if (data.kind === "spreadsheet") {
-        const spreadsheetResponse = await fetch(data.url);
+        const spreadsheetResponse = await authFetch(data.url);
         if (!spreadsheetResponse.ok) {
           throw new Error("Excel 내용을 불러오지 못했습니다.");
         }
@@ -570,31 +502,13 @@ export function CloudApp() {
     }
   }
 
-  async function downloadFile(file: CloudFile) {
-    setBusyLabel("다운로드 준비 중");
-    setNotice(null);
-
-    try {
-      const response = await authFetch(`/api/files/${file.id}/download`);
-      if (!response.ok) {
-        await parseApiResponse<never>(response);
-      }
-
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = file.name;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "다운로드를 시작하지 못했습니다.";
-      setNotice(message);
-    } finally {
-      setBusyLabel(null);
-    }
+  function downloadFile(file: CloudFile) {
+    const anchor = document.createElement("a");
+    anchor.href = `/api/files/${file.id}/download`;
+    anchor.download = file.name;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
   }
 
   async function renameFolder(folder: CloudFolder) {
@@ -833,24 +747,12 @@ export function CloudApp() {
     }
   }
 
-  if (!supabase) {
-    return (
-      <main className="auth-page">
-        <section className="auth-panel">
-          <Cloud aria-hidden="true" className="auth-logo" />
-          <h1>Personal Cloud</h1>
-          <p className="auth-error">Supabase 환경 변수가 설정되지 않았습니다.</p>
-        </section>
-      </main>
-    );
-  }
-
   if (authLoading) {
     return (
       <main className="auth-page">
         <section className="auth-panel compact">
           <Loader2 aria-hidden="true" className="spin auth-logo" />
-          <h1>Personal Cloud</h1>
+          <h1>내 클라우드</h1>
         </section>
       </main>
     );
@@ -860,8 +762,15 @@ export function CloudApp() {
     return (
       <main className="auth-page">
         <section className="auth-panel">
-          <Cloud aria-hidden="true" className="auth-logo" />
-          <h1>Personal Cloud</h1>
+          <Image
+            alt=""
+            aria-hidden="true"
+            className="auth-brand-icon"
+            height={52}
+            src="/brand-icon.png"
+            width={52}
+          />
+          <h1>내 클라우드</h1>
           <form onSubmit={handleAuthSubmit} className="auth-form">
             <label>
               이메일
@@ -921,11 +830,17 @@ export function CloudApp() {
       <aside className="sidebar">
         <div className="brand-row">
           <div className="brand-icon">
-            <Cloud aria-hidden="true" />
+            <Image
+              alt=""
+              aria-hidden="true"
+              height={44}
+              src="/brand-icon.png"
+              width={44}
+            />
           </div>
           <div>
-            <strong>Personal Cloud</strong>
-            <span>{session.user.email}</span>
+            <strong>내 클라우드</strong>
+          <span>{session.email}</span>
           </div>
         </div>
 

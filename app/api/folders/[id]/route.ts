@@ -1,93 +1,99 @@
 import { NextResponse } from "next/server";
+import type { RowDataPacket } from "mysql2/promise";
+import { isAuthError, jsonError, requireUser } from "@/lib/auth";
+import { execute, query } from "@/lib/db";
 import { isUuid, validateDisplayName } from "@/lib/file-utils";
-import { isAuthError, jsonError, requireUser } from "@/lib/supabase/route";
+import type { Folder } from "@/lib/types";
 
-const FOLDER_SELECT = "id,parent_id,name,created_at,updated_at";
+export const runtime = "nodejs";
 
-type Params = {
-  params: {
-    id: string;
-  };
-};
+type FolderRow = RowDataPacket & Folder;
+type Params = { params: Promise<{ id: string }> };
+const FOLDER_SELECT = "id, parent_id, name, created_at, updated_at";
+
+function isDuplicateEntry(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ER_DUP_ENTRY";
+}
 
 export async function PATCH(request: Request, { params }: Params) {
-  const context = await requireUser(request);
+  const { id } = await params;
+  const context = requireUser(request);
   if (isAuthError(context)) {
     return context.errorResponse;
   }
-
-  if (!isUuid(params.id)) {
-    return jsonError("Invalid folder id", 400);
+  if (!isUuid(id)) {
+    return jsonError("폴더 ID가 올바르지 않습니다.");
   }
 
   const payload = await request.json().catch(() => null);
   let name: string;
+  try {
+    name = validateDisplayName(payload?.name, { label: "폴더 이름", maxLength: 80 });
+  } catch (error) {
+    return jsonError(error instanceof Error ? error.message : "폴더 정보가 올바르지 않습니다.");
+  }
 
   try {
-    name = validateDisplayName(payload?.name, {
-      label: "Folder name",
-      maxLength: 80
-    });
+    const result = await execute(
+      "UPDATE cloud_folders SET name = ? WHERE id = ? AND owner_id = ?",
+      [name, id, context.user.id]
+    );
+    if (result.affectedRows === 0) {
+      const [existing] = await query<RowDataPacket & { id: string }>(
+        "SELECT id FROM cloud_folders WHERE id = ? AND owner_id = ? LIMIT 1",
+        [id, context.user.id]
+      );
+      if (!existing) {
+        return jsonError("폴더를 찾을 수 없습니다.", 404);
+      }
+    }
+    const [folder] = await query<FolderRow>(
+      `SELECT ${FOLDER_SELECT} FROM cloud_folders WHERE id = ? AND owner_id = ? LIMIT 1`,
+      [id, context.user.id]
+    );
+    return NextResponse.json({ folder });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Invalid folder";
-    return jsonError(message, 400);
+    if (isDuplicateEntry(error)) {
+      return jsonError("같은 이름의 폴더가 이미 있습니다.", 409);
+    }
+    return jsonError(error instanceof Error ? error.message : "폴더 이름을 바꾸지 못했습니다.", 500);
   }
-
-  const { data, error } = await context.supabase
-    .from("cloud_folders")
-    .update({ name })
-    .eq("id", params.id)
-    .select(FOLDER_SELECT)
-    .single();
-
-  if (error || !data) {
-    return jsonError(error?.message ?? "Folder not found", error ? 400 : 404);
-  }
-
-  return NextResponse.json({ folder: data });
 }
 
 export async function DELETE(request: Request, { params }: Params) {
-  const context = await requireUser(request);
+  const { id } = await params;
+  const context = requireUser(request);
   if (isAuthError(context)) {
     return context.errorResponse;
   }
-
-  if (!isUuid(params.id)) {
-    return jsonError("Invalid folder id", 400);
+  if (!isUuid(id)) {
+    return jsonError("폴더 ID가 올바르지 않습니다.");
   }
 
-  const [childFolders, childFiles] = await Promise.all([
-    context.supabase
-      .from("cloud_folders")
-      .select("id", { count: "exact", head: true })
-      .eq("parent_id", params.id),
-    context.supabase
-      .from("cloud_files")
-      .select("id", { count: "exact", head: true })
-      .eq("folder_id", params.id)
-  ]);
+  try {
+    const [folder] = await query<RowDataPacket & { id: string }>(
+      "SELECT id FROM cloud_folders WHERE id = ? AND owner_id = ? LIMIT 1",
+      [id, context.user.id]
+    );
+    if (!folder) {
+      return jsonError("폴더를 찾을 수 없습니다.", 404);
+    }
 
-  if (childFolders.error) {
-    return jsonError(childFolders.error.message, 500);
+    const [childFolder] = await query<RowDataPacket & { id: string }>(
+      "SELECT id FROM cloud_folders WHERE parent_id = ? AND owner_id = ? LIMIT 1",
+      [id, context.user.id]
+    );
+    const [childFile] = await query<RowDataPacket & { id: string }>(
+      "SELECT id FROM cloud_files WHERE folder_id = ? AND owner_id = ? LIMIT 1",
+      [id, context.user.id]
+    );
+    if (childFolder || childFile) {
+      return jsonError("비어 있는 폴더만 삭제할 수 있습니다.", 409);
+    }
+
+    await execute("DELETE FROM cloud_folders WHERE id = ? AND owner_id = ?", [id, context.user.id]);
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    return jsonError(error instanceof Error ? error.message : "폴더를 삭제하지 못했습니다.", 500);
   }
-
-  if (childFiles.error) {
-    return jsonError(childFiles.error.message, 500);
-  }
-
-  if ((childFolders.count ?? 0) > 0 || (childFiles.count ?? 0) > 0) {
-    return jsonError("Only empty folders can be deleted", 409);
-  }
-
-  const { error } = await context.supabase
-    .from("cloud_folders")
-    .delete()
-    .eq("id", params.id);
-
-  if (error) {
-    return jsonError(error.message, 400);
-  }
-
-  return NextResponse.json({ ok: true });
 }

@@ -1,90 +1,70 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import {
-  isUuid,
-  normalizeOptionalUuid,
-  validateDisplayName
-} from "@/lib/file-utils";
-import { isAuthError, jsonError, requireUser } from "@/lib/supabase/route";
+import type { RowDataPacket } from "mysql2/promise";
+import { isAuthError, jsonError, requireUser } from "@/lib/auth";
+import { execute, query } from "@/lib/db";
+import { normalizeOptionalUuid, validateDisplayName } from "@/lib/file-utils";
+import type { CloudFile, Folder } from "@/lib/types";
 
-const FOLDER_SELECT = "id,parent_id,name,created_at,updated_at";
+export const runtime = "nodejs";
+
+type FolderRow = RowDataPacket & Folder;
+type FileRow = RowDataPacket & CloudFile;
+
+const FOLDER_SELECT = "id, parent_id, name, created_at, updated_at";
 const FILE_SELECT =
-  "id,folder_id,name,mime_type,size_bytes,storage_bucket,storage_path,created_at,updated_at";
+  "id, folder_id, name, mime_type, size_bytes, created_at, updated_at";
+
+function isDuplicateEntry(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ER_DUP_ENTRY";
+}
 
 export async function GET(request: Request) {
-  const context = await requireUser(request);
+  const context = requireUser(request);
   if (isAuthError(context)) {
     return context.errorResponse;
   }
 
-  const url = new URL(request.url);
-  const rawParentId = url.searchParams.get("parentId");
   let parentId: string | null;
+  try {
+    parentId = normalizeOptionalUuid(new URL(request.url).searchParams.get("parentId"));
+  } catch {
+    return jsonError("폴더 경로가 올바르지 않습니다.");
+  }
 
   try {
-    parentId = normalizeOptionalUuid(rawParentId);
-  } catch {
-    return jsonError("Invalid parent folder", 400);
+    const [currentFolders, folders, files] = await Promise.all([
+      parentId
+        ? query<FolderRow>(
+            `SELECT ${FOLDER_SELECT} FROM cloud_folders WHERE id = ? AND owner_id = ? LIMIT 1`,
+            [parentId, context.user.id]
+          )
+        : Promise.resolve([] as FolderRow[]),
+      query<FolderRow>(
+        "SELECT id, parent_id, name, created_at, updated_at FROM cloud_folders WHERE owner_id = ? AND parent_id <=> ? ORDER BY name",
+        [context.user.id, parentId]
+      ),
+      query<FileRow>(
+        `SELECT ${FILE_SELECT} FROM cloud_files WHERE owner_id = ? AND folder_id <=> ? ORDER BY name`,
+        [context.user.id, parentId]
+      )
+    ]);
+
+    if (parentId && !currentFolders[0]) {
+      return jsonError("폴더를 찾을 수 없습니다.", 404);
+    }
+    return NextResponse.json({
+      currentFolder: currentFolders[0] ?? null,
+      files,
+      folders
+    });
+  } catch (error) {
+    return jsonError(error instanceof Error ? error.message : "목록을 불러오지 못했습니다.", 500);
   }
-
-  const currentFolderQuery = parentId
-    ? context.supabase
-        .from("cloud_folders")
-        .select(FOLDER_SELECT)
-        .eq("id", parentId)
-        .single()
-    : Promise.resolve({ data: null, error: null });
-
-  const folderQuery = parentId
-    ? context.supabase
-        .from("cloud_folders")
-        .select(FOLDER_SELECT)
-        .eq("parent_id", parentId)
-        .order("name", { ascending: true })
-    : context.supabase
-        .from("cloud_folders")
-        .select(FOLDER_SELECT)
-        .is("parent_id", null)
-        .order("name", { ascending: true });
-
-  const fileQuery = parentId
-    ? context.supabase
-        .from("cloud_files")
-        .select(FILE_SELECT)
-        .eq("folder_id", parentId)
-        .order("name", { ascending: true })
-    : context.supabase
-        .from("cloud_files")
-        .select(FILE_SELECT)
-        .is("folder_id", null)
-        .order("name", { ascending: true });
-
-  const [currentFolderResult, folderResult, fileResult] = await Promise.all([
-    currentFolderQuery,
-    folderQuery,
-    fileQuery
-  ]);
-
-  if (currentFolderResult.error || (parentId && !currentFolderResult.data)) {
-    return jsonError("Folder not found", 404);
-  }
-
-  if (folderResult.error) {
-    return jsonError(folderResult.error.message, 500);
-  }
-
-  if (fileResult.error) {
-    return jsonError(fileResult.error.message, 500);
-  }
-
-  return NextResponse.json({
-    currentFolder: currentFolderResult.data,
-    folders: folderResult.data ?? [],
-    files: fileResult.data ?? []
-  });
 }
 
 export async function POST(request: Request) {
-  const context = await requireUser(request);
+  const context = requireUser(request);
   if (isAuthError(context)) {
     return context.errorResponse;
   }
@@ -92,34 +72,38 @@ export async function POST(request: Request) {
   const payload = await request.json().catch(() => null);
   let name: string;
   let parentId: string | null;
-
   try {
-    name = validateDisplayName(payload?.name, {
-      label: "Folder name",
-      maxLength: 80
-    });
+    name = validateDisplayName(payload?.name, { label: "폴더 이름", maxLength: 80 });
     parentId = normalizeOptionalUuid(payload?.parentId);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Invalid folder";
-    return jsonError(message, 400);
+    return jsonError(error instanceof Error ? error.message : "폴더 정보가 올바르지 않습니다.");
   }
 
-  if (payload?.parentId && parentId && !isUuid(parentId)) {
-    return jsonError("Invalid parent folder", 400);
+  try {
+    if (parentId) {
+      const [parent] = await query<RowDataPacket & { id: string }>(
+        "SELECT id FROM cloud_folders WHERE id = ? AND owner_id = ? LIMIT 1",
+        [parentId, context.user.id]
+      );
+      if (!parent) {
+        return jsonError("상위 폴더를 찾을 수 없습니다.", 404);
+      }
+    }
+
+    const id = randomUUID();
+    await execute(
+      "INSERT INTO cloud_folders (id, owner_id, parent_id, name) VALUES (?, ?, ?, ?)",
+      [id, context.user.id, parentId, name]
+    );
+    const [folder] = await query<FolderRow>(
+      `SELECT ${FOLDER_SELECT} FROM cloud_folders WHERE id = ? AND owner_id = ? LIMIT 1`,
+      [id, context.user.id]
+    );
+    return NextResponse.json({ folder }, { status: 201 });
+  } catch (error) {
+    if (isDuplicateEntry(error)) {
+      return jsonError("같은 이름의 폴더가 이미 있습니다.", 409);
+    }
+    return jsonError(error instanceof Error ? error.message : "폴더를 만들지 못했습니다.", 500);
   }
-
-  const { data, error } = await context.supabase
-    .from("cloud_folders")
-    .insert({
-      name,
-      parent_id: parentId
-    })
-    .select(FOLDER_SELECT)
-    .single();
-
-  if (error) {
-    return jsonError(error.message, 400);
-  }
-
-  return NextResponse.json({ folder: data }, { status: 201 });
 }

@@ -12,8 +12,6 @@ export type CloudFile = {
   name: string;
   mime_type: string;
   size_bytes: number;
-  storage_bucket: string;
-  storage_path: string;
   created_at: string;
   updated_at: string;
 };
