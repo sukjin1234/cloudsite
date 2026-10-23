@@ -26,6 +26,7 @@ function getPool() {
     password: process.env.MYSQL_PASSWORD ?? "",
     port: Number(process.env.MYSQL_PORT ?? 3306),
     supportBigNumbers: true,
+    user,
     waitForConnections: true
   });
   return pool;
