@@ -8,7 +8,7 @@ const FILE_PREVIEW_TTL_SECONDS = 60 * 5;
 
 export type AuthenticatedUser = {
   id: string;
-  email: string;
+  username: string;
 };
 
 type SessionPayload = AuthenticatedUser & {
@@ -106,13 +106,13 @@ function readSessionToken(token: string): AuthenticatedUser | null {
     if (
       typeof payload.id !== "string" ||
       !isUuid(payload.id) ||
-      typeof payload.email !== "string" ||
+      typeof payload.username !== "string" ||
       typeof payload.expiresAt !== "number" ||
       payload.expiresAt <= Math.floor(Date.now() / 1000)
     ) {
       return null;
     }
-    return { email: payload.email, id: payload.id };
+    return { id: payload.id, username: payload.username };
   } catch {
     return null;
   }

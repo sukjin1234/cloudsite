@@ -34,7 +34,7 @@ export async function GET(request: Request, { params }: Params) {
     return jsonError("파일을 찾을 수 없습니다.", 404);
   }
   const context = previewAccess
-    ? { user: { id: previewAccess.ownerId, email: "" } }
+    ? { user: { id: previewAccess.ownerId, username: "" } }
     : requireUser(request);
   if (isAuthError(context)) {
     return context.errorResponse;

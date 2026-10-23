@@ -1,3 +1,7 @@
+{
+	default_sni {$SERVER_PUBLIC_IP}
+}
+
 {$SERVER_PUBLIC_IP} {
 	tls {
 		issuer acme {

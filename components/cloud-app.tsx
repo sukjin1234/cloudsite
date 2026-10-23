@@ -65,7 +65,7 @@ type PreviewResponse = {
 
 type CloudUser = {
   id: string;
-  email: string;
+  username: string;
 };
 
 const ROOT_BREADCRUMB: Breadcrumb = {
@@ -157,8 +157,7 @@ function FileKindIcon({ file }: { file: CloudFile }) {
 export function CloudApp() {
   const [session, setSession] = useState<CloudUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
@@ -338,8 +337,8 @@ export function CloudApp() {
     setAuthMessage(null);
 
     try {
-      const response = await fetch(`/api/auth/${authMode}`, {
-        body: JSON.stringify({ email, password }),
+      const response = await fetch("/api/auth/login", {
+        body: JSON.stringify({ username, password }),
         headers: { "Content-Type": "application/json" },
         method: "POST"
       });
@@ -773,20 +772,21 @@ export function CloudApp() {
           <h1>내 클라우드</h1>
           <form onSubmit={handleAuthSubmit} className="auth-form">
             <label>
-              이메일
+              아이디
               <input
-                autoComplete="email"
-                onChange={(event) => setEmail(event.target.value)}
+                autoComplete="username"
+                autoCapitalize="none"
+                onChange={(event) => setUsername(event.target.value)}
                 required
-                type="email"
-                value={email}
+                spellCheck={false}
+                type="text"
+                value={username}
               />
             </label>
             <label>
               비밀번호
               <input
-                autoComplete={authMode === "login" ? "current-password" : "new-password"}
-                minLength={6}
+                autoComplete="current-password"
                 onChange={(event) => setPassword(event.target.value)}
                 required
                 type="password"
@@ -796,19 +796,9 @@ export function CloudApp() {
             {authMessage ? <p className="auth-error">{authMessage}</p> : null}
             <button className="primary-button" disabled={authSubmitting} type="submit">
               {authSubmitting ? <Loader2 aria-hidden="true" className="spin" /> : null}
-              {authMode === "login" ? "로그인" : "가입"}
+              로그인
             </button>
           </form>
-          <button
-            className="text-button"
-            onClick={() => {
-              setAuthMessage(null);
-              setAuthMode((mode) => (mode === "login" ? "signup" : "login"));
-            }}
-            type="button"
-          >
-            {authMode === "login" ? "새 계정 만들기" : "로그인으로 돌아가기"}
-          </button>
         </section>
       </main>
     );
@@ -840,7 +830,7 @@ export function CloudApp() {
           </div>
           <div>
             <strong>내 클라우드</strong>
-          <span>{session.email}</span>
+          <span>{session.username}</span>
           </div>
         </div>
 

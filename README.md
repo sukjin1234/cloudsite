@@ -4,7 +4,7 @@ Next.js, MySQL, 서버 파일 저장소를 사용하는 개인용 파일 보관 
 
 ## 기능
 
-- MySQL 계정과 비밀번호 기반 가입 및 로그인
+- DB에 직접 등록한 아이디와 비밀번호로 로그인 (회원가입 기능 없음)
 - 폴더 생성, 이름 변경, 이동, 빈 폴더 삭제
 - 파일 업로드, 검색, 다운로드, 미리보기
 - Microsoft Office 온라인 미리보기
@@ -64,6 +64,25 @@ Windows PowerShell에서 실행:
 
 ```powershell
 Get-Content -Raw .\mysql\schema.sql | mysql -u root -p
+```
+
+기존 설치의 DB에는 위 `CREATE TABLE IF NOT EXISTS`만으로 컬럼명이 바뀌지 않습니다. Docker를 쓰는 기존 서버에서는 프로젝트 파일을 업데이트한 뒤 아래 명령을 한 번 실행하세요. 기존 이메일 값은 아이디 값으로 유지됩니다.
+
+```bash
+docker compose exec -T db sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD"' < mysql/migrate-email-to-username.sql
+```
+
+계정은 `cloud_users`에 직접 추가합니다. `password_hash`에는 평문 비밀번호가 아니라 앱의 scrypt 형식 해시를 넣어야 합니다. 해시는 서버에서 아래 명령으로 생성할 수 있습니다.
+
+```bash
+node -e 'const { randomBytes, scryptSync } = require("node:crypto"); const password = "원하는_비밀번호"; const salt = randomBytes(16); console.log(`scrypt$${salt.toString("hex")}$${scryptSync(password, salt, 64).toString("hex")}`)'
+```
+
+출력된 해시를 붙여 넣어 사용자를 추가합니다.
+
+```sql
+INSERT INTO personal_cloud.cloud_users (id, username, password_hash)
+VALUES (UUID(), '원하는_아이디', '위에서_생성한_해시');
 ```
 
 앱 전용 계정을 만들고 데이터베이스 접근 권한을 부여합니다. 아래 비밀번호를 `.env.local`의 `MYSQL_PASSWORD`와 동일하게 설정하세요.

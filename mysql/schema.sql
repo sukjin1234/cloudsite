@@ -6,11 +6,11 @@ USE personal_cloud;
 
 CREATE TABLE IF NOT EXISTS cloud_users (
   id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-  email VARCHAR(320) NOT NULL,
+  username VARCHAR(320) NOT NULL,
   password_hash VARCHAR(180) CHARACTER SET ascii NOT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
-  UNIQUE KEY cloud_users_email_uq (email)
+  UNIQUE KEY cloud_users_username_uq (username)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS cloud_folders (
