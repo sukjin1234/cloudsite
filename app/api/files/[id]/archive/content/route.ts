@@ -9,6 +9,7 @@ import { listArchiveEntries, normalizeArchivePath, runArchiveWorker } from "@/li
 import { query } from "@/lib/db";
 import { getStoredFilePath } from "@/lib/file-storage";
 import { getFileExtension, isUuid } from "@/lib/file-utils";
+import { extractZipEntry } from "@/lib/zip-utils";
 import type { CloudFile } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -36,12 +37,17 @@ export async function GET(request: Request, { params }: Params) {
     const [file] = await query<FileRow>("SELECT id, folder_id, name, mime_type, size_bytes, created_at, updated_at FROM cloud_files WHERE id = ? AND owner_id = ? LIMIT 1", [id, context.user.id]);
     if (!file || !["zip", "7z", "tar"].includes(getFileExtension(file.name))) return jsonError("압축 파일을 찾을 수 없습니다.", 404);
     const archivePath = getStoredFilePath(context.user.id, id);
-    const entry = (await listArchiveEntries(archivePath, request.signal)).find((item) => item.path === safePath && !item.folder);
-    if (!entry) return jsonError("압축 파일 내부 파일을 찾을 수 없습니다.", 404);
     const outputDirectory = await mkdtemp(path.join(tmpdir(), "cloud-preview-"));
     try {
-      await runArchiveWorker({ type: "extract", archivePath, outputPath: outputDirectory, entryPath: entry.sourcePath }, request.signal);
-      const extractedPath = path.join(outputDirectory, ...entry.path.split("/"));
+      const extracted = getFileExtension(file.name) === "zip"
+        ? await extractZipEntry(archivePath, safePath, outputDirectory, request.signal)
+        : await (async () => {
+            const entry = (await listArchiveEntries(archivePath, request.signal)).find((item) => item.path === safePath && !item.folder);
+            if (!entry) throw new Error("압축 파일 내부 파일을 찾을 수 없습니다.");
+            await runArchiveWorker({ type: "extract", archivePath, outputPath: outputDirectory, entryPath: entry.sourcePath }, request.signal);
+            return { path: path.join(outputDirectory, ...entry.path.split("/")), size: entry.size };
+          })();
+      const extractedPath = extracted.path;
       const details = await stat(extractedPath);
       if (!details.isFile()) throw new Error("압축 파일 내부 파일을 찾지 못했습니다.");
       const rangeHeader = request.headers.get("range");

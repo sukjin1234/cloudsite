@@ -20,8 +20,8 @@ type Preview =
   | { status: "idle" }
   | { status: "loading"; file: CloudFile }
   | { status: "error"; file: CloudFile; message: string }
-  | { status: "blocked"; file: CloudFile; kind: PreviewKind; url: string }
-  | { status: "ready"; docxBuffer?: ArrayBuffer; file: CloudFile; kind: PreviewKind; partial?: boolean; spreadsheet?: SpreadsheetPreview; text?: string; url: string };
+  | { status: "blocked"; file: CloudFile; kind: PreviewKind }
+  | { status: "ready"; docxBuffer?: ArrayBuffer; file: CloudFile; kind: PreviewKind; spreadsheet?: SpreadsheetPreview; text?: string; url: string };
 type SortBy = "name" | "modified" | "type" | "size";
 type ClipboardState = { action: "copy" | "cut"; items: NodeRef[] } | null;
 type StorageUsage = { usedBytes: number; quotaBytes: number };
@@ -35,7 +35,6 @@ const FILE_DRAG = "application/x-cloud-file-ids";
 const FOLDER_DRAG = "application/x-cloud-folder-ids";
 const CHUNK_SIZE = 8 * 1024 * 1024;
 const PREVIEW_LIMIT = 20 * 1024 * 1024;
-const LARGE_TEXT_PREVIEW_SIZE = 512 * 1024;
 
 async function api<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const response = await fetch(input, { ...init, credentials: "same-origin" });
@@ -43,22 +42,6 @@ async function api<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> 
   if (response.status === 401) window.dispatchEvent(new Event("cloud-session-expired"));
   if (!response.ok) throw new Error(data.error ?? "요청을 처리하지 못했습니다.");
   return data;
-}
-
-function parseLargeSpreadsheet(buffer: ArrayBuffer, signal: AbortSignal) {
-  return new Promise<SpreadsheetPreview>((resolve, reject) => {
-    const worker = new Worker("/xlsx-preview-worker.js");
-    const cleanup = () => { signal.removeEventListener("abort", abort); worker.terminate(); };
-    const abort = () => { cleanup(); reject(new DOMException("미리보기가 취소되었습니다.", "AbortError")); };
-    signal.addEventListener("abort", abort, { once: true });
-    worker.onmessage = (event: MessageEvent<{ ok: boolean; spreadsheet?: SpreadsheetPreview; error?: string }>) => {
-      cleanup();
-      if (event.data.ok && event.data.spreadsheet) resolve(event.data.spreadsheet);
-      else reject(new Error(event.data.error ?? "Excel 미리보기를 만들지 못했습니다."));
-    };
-    worker.onerror = () => { cleanup(); reject(new Error("Excel 미리보기 작업을 시작하지 못했습니다.")); };
-    worker.postMessage({ buffer }, [buffer]);
-  });
 }
 
 function keyOf(item: NodeRef) { return item.type + ":" + item.id; }
@@ -343,11 +326,15 @@ export function WindowsExplorer() {
     previewRequest.current += 1;
   }
 
-  async function loadPreview(file: CloudFile, force = false) {
+  async function loadPreview(file: CloudFile) {
     previewAbort.current?.abort();
+    previewAbort.current = null;
+    const requestId = ++previewRequest.current;
+    const kind = getPreviewKind(file.mime_type, file.name);
+    if (kind === "archive") { setPreview({ status: "idle" }); return; }
+    if (Number(file.size_bytes) >= PREVIEW_LIMIT) { setPreview({ file, kind, status: "blocked" }); return; }
     const controller = new AbortController();
     previewAbort.current = controller;
-    const requestId = ++previewRequest.current;
     setPreview({ file, status: "loading" });
     try {
       const result = await api<{ kind: PreviewKind; url: string }>("/api/files/" + file.id + "/preview", { signal: controller.signal });
@@ -355,21 +342,18 @@ export function WindowsExplorer() {
       if (result.kind === "unsupported" || result.kind === "office") {
         setPreview({ file, message: "이 파일 형식은 미리 볼 수 없습니다.", status: "error" }); setNotice("이 파일 형식은 미리 볼 수 없습니다."); return;
       }
-      const large = Number(file.size_bytes) >= PREVIEW_LIMIT;
-      if (large && !force) { setPreview({ file, kind: result.kind, status: "blocked", url: result.url }); return; }
       let text: string | undefined; let docxBuffer: ArrayBuffer | undefined; let spreadsheet: SpreadsheetPreview | undefined;
       if (result.kind === "text" || result.kind === "document" || result.kind === "spreadsheet") {
-        const partialText = large && result.kind === "text";
-        const content = await fetch(result.url, { credentials: "same-origin", headers: partialText ? { Range: "bytes=0-" + (LARGE_TEXT_PREVIEW_SIZE - 1) } : undefined, signal: controller.signal });
+        const content = await fetch(result.url, { credentials: "same-origin", signal: controller.signal });
         if (!content.ok) throw new Error("파일 내용을 불러오지 못했습니다.");
         if (result.kind === "text") text = await content.text();
         if (result.kind === "document") docxBuffer = await content.arrayBuffer();
         if (result.kind === "spreadsheet") {
           const buffer = await content.arrayBuffer();
-          spreadsheet = large ? await parseLargeSpreadsheet(buffer, controller.signal) : await parseXlsxPreview(buffer);
+          spreadsheet = await parseXlsxPreview(buffer);
         }
       }
-      if (requestId === previewRequest.current) setPreview({ docxBuffer, file, kind: result.kind, partial: large && (result.kind === "text" || result.kind === "spreadsheet"), spreadsheet, status: "ready", text, url: result.url });
+      if (requestId === previewRequest.current) setPreview({ docxBuffer, file, kind: result.kind, spreadsheet, status: "ready", text, url: result.url });
     } catch (error) {
       if (!controller.signal.aborted && requestId === previewRequest.current) {
         const message = error instanceof Error ? error.message : "미리보기를 열지 못했습니다.";
@@ -394,33 +378,29 @@ export function WindowsExplorer() {
     finally { if (requestId === previewRequest.current) setBusy(""); }
   }
 
-  async function loadArchivePreview(entry: ArchiveEntry, force = false) {
+  async function loadArchivePreview(entry: ArchiveEntry) {
     if (!archiveView || entry.type !== "file") return;
     previewAbort.current?.abort();
-    const controller = new AbortController();
-    previewAbort.current = controller;
     const requestId = ++previewRequest.current;
     const file: CloudFile = { ...archiveView.file, name: entry.name, mime_type: "application/octet-stream", size_bytes: entry.size };
     const kind = getPreviewKind(file.mime_type, file.name);
+    if (entry.size >= PREVIEW_LIMIT) { setPreview({ file, kind, status: "blocked" }); return; }
     if (kind === "unsupported" || kind === "office" || kind === "archive") {
       setPreview({ file, message: "이 파일 형식은 미리 볼 수 없습니다.", status: "error" }); setNotice("이 파일 형식은 미리 볼 수 없습니다."); return;
     }
-    if (entry.size >= PREVIEW_LIMIT && !force) { setPreview({ file, kind, status: "blocked", url: "" }); return; }
+    const controller = new AbortController();
+    previewAbort.current = controller;
     const params = new URLSearchParams({ path: entry.path });
     const url = "/api/files/" + archiveView.file.id + "/archive/content?" + params;
     setPreview({ file, status: "loading" });
     try {
-      const partialText = entry.size >= PREVIEW_LIMIT && kind === "text";
-      const content = await fetch(url, { credentials: "same-origin", headers: partialText ? { Range: "bytes=0-" + (LARGE_TEXT_PREVIEW_SIZE - 1) } : undefined, signal: controller.signal });
+      const content = await fetch(url, { credentials: "same-origin", signal: controller.signal });
       if (!content.ok) throw new Error((await content.json().catch(() => ({})) as { error?: string }).error ?? "압축 파일 내용을 불러오지 못했습니다.");
       let text: string | undefined; let docxBuffer: ArrayBuffer | undefined; let spreadsheet: SpreadsheetPreview | undefined;
       if (kind === "text") text = await content.text();
       if (kind === "document") docxBuffer = await content.arrayBuffer();
-      if (kind === "spreadsheet") {
-        const buffer = await content.arrayBuffer();
-        spreadsheet = entry.size >= PREVIEW_LIMIT ? await parseLargeSpreadsheet(buffer, controller.signal) : await parseXlsxPreview(buffer);
-      }
-      if (requestId === previewRequest.current) setPreview({ docxBuffer, file, kind, partial: partialText || (entry.size >= PREVIEW_LIMIT && kind === "spreadsheet"), spreadsheet, status: "ready", text, url });
+      if (kind === "spreadsheet") spreadsheet = await parseXlsxPreview(await content.arrayBuffer());
+      if (requestId === previewRequest.current) setPreview({ docxBuffer, file, kind, spreadsheet, status: "ready", text, url });
     } catch (error) { if (!controller.signal.aborted && requestId === previewRequest.current) {
       const message = error instanceof Error ? error.message : "압축 파일 내용을 미리 볼 수 없습니다.";
       setPreview({ file, message, status: "error" }); setNotice(message);
@@ -1097,10 +1077,11 @@ export function WindowsExplorer() {
       <button aria-label="미리보기 패널 너비 조절" className="win-preview-resizer" onPointerDown={(event) => { event.preventDefault(); resizeState.current = { target: "preview", x: event.clientX, width: previewWidth }; document.body.classList.add("win-is-resizing"); }} type="button" />
       <div className="win-preview-top" onPointerDown={(event) => { if (event.ctrlKey) { event.preventDefault(); previewDragY.current = event.clientY; event.currentTarget.setPointerCapture(event.pointerId); } }} onPointerMove={(event) => { if (previewDragY.current !== null) { const delta = previewDragY.current - event.clientY; previewDragY.current = event.clientY; setPreviewZoom((value) => Math.max(0.5, Math.min(3, value + delta * 0.01))); } }} onPointerUp={() => { previewDragY.current = null; }}>
         <div className="win-preview-zoom" style={{ zoom: previewZoom }}>
-        {archiveView ? archiveSelected?.type === "file" ? <PreviewContent onOpenLarge={() => preview.status === "blocked" && void loadArchivePreview(archiveSelected, true)} preview={preview} /> : archiveSelected ? <div className="win-folder-summary"><ExplorerFolderIcon className="is-large" /><strong>{archiveSelected.name}</strong><span>{archiveSelected.type === "folder" ? "폴더" : formatFileSize(archiveSelected.size)}</span></div> : <div className="win-folder-summary"><Archive className="win-archive-summary-icon" /><strong>{archiveView.file.name}</strong><span>{archiveView.entries.length}개 항목</span></div>
+        {archiveView ? archiveSelected?.type === "file" ? <PreviewContent preview={preview} /> : archiveSelected ? <div className="win-folder-summary"><ExplorerFolderIcon className="is-large" /><strong>{archiveSelected.name}</strong><span>{archiveSelected.type === "folder" ? "폴더" : formatFileSize(archiveSelected.size)}</span></div> : <div className="win-folder-summary"><Archive className="win-archive-summary-icon" /><strong>{archiveView.file.name}</strong><span>{archiveView.entries.length}개 항목</span></div>
           : selected.length > 1 ? <div className="win-selection-summary"><div className="win-summary-icon"><FileText /></div><strong>{selected.length}개 항목 선택됨</strong><span>{formatFileSize(selectedBytes)}</span></div>
           : selectedFolder ? <div className="win-folder-summary"><ExplorerFolderIcon className="is-large" /><strong>{selectedFolder.name}</strong><span>{folderChildCount ?? 0}개 항목</span></div>
-            : selectedFile ? <PreviewContent onOpenLarge={() => preview.status === "blocked" && (preview.kind === "archive" ? void loadArchive(selectedFile as ExplorerFile) : void loadPreview(selectedFile, true))} preview={preview} />
+            : selectedFile && getPreviewKind(selectedFile.mime_type, selectedFile.name) === "archive" ? <div className="win-preview-placeholder"><Archive /></div>
+              : selectedFile ? <PreviewContent preview={preview} />
               : <div className="win-folder-summary"><ExplorerFolderIcon className="is-large" /><strong>{current.name}</strong><span>{totalItems}개 항목</span></div>}
         </div>
       </div>
@@ -1141,16 +1122,16 @@ export function WindowsExplorer() {
   </main>;
 }
 
-function PreviewContent({ onOpenLarge, preview }: { onOpenLarge: () => void; preview: Preview }) {
+function PreviewContent({ preview }: { preview: Preview }) {
   const [activeSheet, setActiveSheet] = useState(0);
-  const codeLines = useMemo(() => preview.status === "ready" && !preview.partial && preview.kind === "text" && !preview.file.name.toLowerCase().endsWith(".csv")
+  const codeLines = useMemo(() => preview.status === "ready" && preview.kind === "text" && !preview.file.name.toLowerCase().endsWith(".csv")
     ? hljs.highlightAuto(preview.text ?? "").value.split(/\r?\n/)
     : [], [preview]);
   useEffect(() => { setActiveSheet(0); }, [preview.status === "ready" ? preview.file.id : ""]);
   if (preview.status === "idle") return <div className="win-preview-placeholder"><FileText /></div>;
   if (preview.status === "loading") return <div className="win-preview-placeholder"><LoaderCircle className="win-spin" /></div>;
   if (preview.status === "error") return <div className="win-preview-placeholder"><FileKindIcon file={preview.file} /><span>{preview.message}</span></div>;
-  if (preview.status === "blocked") return <div className="win-preview-large-notice"><FileKindIcon file={preview.file} /><strong>파일이 커서 미리보기를 제한합니다</strong><span>{formatFileSize(Number(preview.file.size_bytes))}</span><button onClick={onOpenLarge} type="button">그래도 열기</button></div>;
+  if (preview.status === "blocked") return <div className="win-preview-large-notice"><FileKindIcon file={preview.file} /><strong>파일이 커서 미리보기를 지원하지 않습니다</strong><span>{formatFileSize(Number(preview.file.size_bytes))}</span></div>;
   if (preview.kind === "archive") return <div className="win-preview-placeholder"><Archive /><span>압축 파일을 열면 내부 항목을 탐색할 수 있습니다.</span></div>;
   if (preview.kind === "image") return <img alt={preview.file.name} className="win-preview-image" src={preview.url} />;
   if (preview.kind === "pdf") return <iframe className="win-preview-frame" src={preview.url} title={preview.file.name} />;
@@ -1161,15 +1142,14 @@ function PreviewContent({ onOpenLarge, preview }: { onOpenLarge: () => void; pre
       const rows = (preview.text ?? "").split(/\r?\n/).slice(0, 80).map((row) => row.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).slice(0, 12));
       return <div className="win-preview-table-scroll"><table className="win-preview-table"><tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell.replace(/^"|"$/g, "")}</td>)}</tr>)}</tbody></table></div>;
     }
-    const plainLines = preview.partial ? (preview.text ?? "").split(/\r?\n/) : [];
-    return <>{preview.partial ? <div className="win-preview-partial-note">큰 파일의 앞부분만 표시합니다.</div> : null}<pre className="win-preview-code"><code>{preview.partial ? plainLines.map((line, index) => <span key={index}><i>{index + 1}</i><b>{line || " "}</b></span>) : codeLines.map((line, index) => <span key={index}><i>{index + 1}</i><b dangerouslySetInnerHTML={{ __html: line || " " }} /></span>)}</code></pre></>;
+    return <pre className="win-preview-code"><code>{codeLines.map((line, index) => <span key={index}><i>{index + 1}</i><b dangerouslySetInnerHTML={{ __html: line || " " }} /></span>)}</code></pre>;
   }
   if (preview.kind === "document" && preview.docxBuffer) return <DocxCanvas buffer={preview.docxBuffer} />;
   if (preview.kind === "spreadsheet" && preview.spreadsheet) {
     const sheet = preview.spreadsheet.sheets[Math.min(activeSheet, preview.spreadsheet.sheets.length - 1)];
     return <div className="win-spreadsheet-preview">
       <div aria-label="시트 선택" className="win-preview-sheet-tabs" role="tablist">{preview.spreadsheet.sheets.map((entry, index) => <button aria-selected={activeSheet === index} className={activeSheet === index ? "is-active" : ""} key={entry.name} onClick={() => setActiveSheet(index)} role="tab" type="button">{entry.name}</button>)}</div>
-      {preview.partial ? <div className="win-preview-partial-note">큰 파일의 첫 시트 100행만 표시합니다.</div> : null}<div className="win-preview-table-scroll"><table className="win-preview-table"><tbody>{sheet?.rows.slice(0, 100).map((row, rowIndex) => <tr key={rowIndex}>{row.slice(0, 24).map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>)}</tbody></table></div>
+      <div className="win-preview-table-scroll"><table className="win-preview-table"><tbody>{sheet?.rows.slice(0, 100).map((row, rowIndex) => <tr key={rowIndex}>{row.slice(0, 24).map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>)}</tbody></table></div>
     </div>;
   }
   return <div className="win-preview-placeholder"><FileKindIcon file={preview.file} /><span>미리 볼 수 없습니다.</span></div>;

@@ -2,7 +2,7 @@ import { Worker } from "node:worker_threads";
 import path from "node:path";
 
 export type ArchiveEntry = { name: string; path: string; size: number; type: "file" | "folder" };
-type ListedEntry = { path: string; sourcePath: string; size: number; folder: boolean };
+export type ListedEntry = { path: string; sourcePath: string; size: number; folder: boolean };
 type ArchiveWorkerResult = { ok: true; output: string } | { ok: false; error: string };
 
 export function runArchiveWorker(workerData: { type: "list"; archivePath: string } | { type: "extract"; archivePath: string; outputPath: string; entryPath: string } | { type: "create"; sourcePath: string; outputPath: string }, signal?: AbortSignal) {

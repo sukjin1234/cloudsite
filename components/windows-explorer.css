@@ -229,7 +229,6 @@
 .win-preview-large-notice > svg { color: var(--win-blue); height: 38px; width: 38px; }
 .win-preview-large-notice strong { color: var(--win-text); font-size: 14px; }
 .win-preview-large-notice button { background: #1768b5; color: #fff; min-height: 34px; padding: 0 13px; }
-.win-preview-partial-note { background: color-mix(in srgb, var(--win-blue) 16%, var(--win-panel)); color: var(--win-text); font-size: 11px; padding: 7px 10px; }
 .win-archive-summary-icon { color: #e5b64c; height: 52px; width: 52px; }
 .win-preview-image { height: 100%; max-height: 100%; max-width: 100%; object-fit: contain; width: 100%; }
 .win-preview-frame { background: #fff; border: 0; height: 100%; min-height: 500px; width: 100%; }
