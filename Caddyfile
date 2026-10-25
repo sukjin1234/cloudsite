@@ -2,12 +2,16 @@
 	default_sni {$SERVER_PUBLIC_IP}
 }
 
-{$SERVER_PUBLIC_IP}, whdo.kro.kr {
+{$SERVER_PUBLIC_IP} {
 	tls {
 		issuer acme {
 			profile shortlived
 		}
 	}
 
+	reverse_proxy app:3000
+}
+
+whdo.kro.kr {
 	reverse_proxy app:3000
 }
