@@ -132,6 +132,7 @@
 .win-sidebar-heading { color: #bdbdbd; font-size: 12px; font-weight: 600; margin: 0 8px 7px; }
 .win-sidebar-item { align-items: center; animation: win-pin-in 180ms ease-out both; color: #ededed; gap: 9px; height: 34px; justify-content: flex-start !important; min-width: 0; padding: 0 9px; text-align: left; width: 100%; }
 .win-sidebar-item.is-current { background: #353535; }
+.win-sidebar-item.is-multi-selected { background: rgba(48, 128, 208, .34); outline: 1px solid rgba(95, 173, 255, .55); outline-offset: -1px; }
 .win-sidebar-item.is-drop-target { background: #23476a; outline: 1px solid #4ea5ff; }
 .win-sidebar-item .win-folder-icon { height: 19px; width: 23px; }
 .win-sidebar-item > .win-file-icon { flex: 0 0 17px !important; height: 17px; width: 17px; }
@@ -350,6 +351,7 @@
 .win-shell[data-theme="light"] .win-menu hr { border-color: #ddd; }
 .win-shell[data-theme="light"] .win-toolbar-divider, .win-shell[data-theme="light"] .win-name-head, .win-shell[data-theme="light"] .win-col-head { border-color: #ddd !important; }
 .win-shell[data-theme="light"] .win-sidebar-item.is-current { background: #e5e5e5; }
+.win-shell[data-theme="light"] .win-sidebar-item.is-multi-selected { background: rgba(0, 120, 212, .16); outline-color: rgba(0, 120, 212, .48); }
 .win-shell[data-theme="light"] .win-trash-sidebar > svg { color: #555; }
 .win-shell[data-theme="light"] .win-toolbar-new > svg:first-child { color: #1677b8; }
 .win-shell[data-theme="light"] .win-view-switch button.is-active { background: #e5e5e5; border-color: #cfcfcf; }
