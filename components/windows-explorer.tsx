@@ -451,7 +451,7 @@ export function WindowsExplorer() {
       const result = await api<{ kind: PreviewKind; url: string }>("/api/files/" + file.id + "/preview", { signal: controller.signal });
       if (requestId !== previewRequest.current) return;
       if (result.kind === "unsupported" || result.kind === "office") {
-        setPreview({ file, message: "이 파일 형식은 미리 볼 수 없습니다.", status: "error" }); setNotice("이 파일 형식은 미리 볼 수 없습니다."); return;
+        setPreview({ file, message: "이 파일 형식은 미리 볼 수 없습니다.", status: "error" }); return;
       }
       let text: string | undefined; let docxBuffer: ArrayBuffer | undefined; let spreadsheet: SpreadsheetPreview | undefined;
       if (result.kind === "text" || result.kind === "document" || result.kind === "spreadsheet") {
@@ -497,7 +497,7 @@ export function WindowsExplorer() {
     const kind = getPreviewKind(file.mime_type, file.name);
     if (entry.size >= PREVIEW_LIMIT) { setPreview({ file, kind, status: "blocked" }); return; }
     if (kind === "unsupported" || kind === "office" || kind === "archive") {
-      setPreview({ file, message: "이 파일 형식은 미리 볼 수 없습니다.", status: "error" }); setNotice("이 파일 형식은 미리 볼 수 없습니다."); return;
+      setPreview({ file, message: "이 파일 형식은 미리 볼 수 없습니다.", status: "error" }); return;
     }
     const controller = new AbortController();
     previewAbort.current = controller;
