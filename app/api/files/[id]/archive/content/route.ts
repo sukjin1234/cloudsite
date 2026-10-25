@@ -1,7 +1,7 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { Readable } from "node:stream";
 import { path7za } from "7zip-bin";
-import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import { isAuthError, jsonError, requireUser } from "@/lib/auth";
 import { listArchiveEntries, normalizeArchivePath } from "@/lib/archive-utils";
@@ -11,8 +11,6 @@ import { getFileExtension, isUuid } from "@/lib/file-utils";
 import type { CloudFile } from "@/lib/types";
 
 export const runtime = "nodejs";
-const run7za = promisify(execFile);
-const PREVIEW_LIMIT = 20 * 1024 * 1024;
 type Params = { params: Promise<{ id: string }> };
 type FileRow = RowDataPacket & CloudFile;
 
@@ -39,18 +37,21 @@ export async function GET(request: Request, { params }: Params) {
     const archivePath = getStoredFilePath(context.user.id, id);
     const entry = (await listArchiveEntries(archivePath)).find((item) => item.path === safePath && !item.folder);
     if (!entry) return jsonError("압축 파일 내부 파일을 찾을 수 없습니다.", 404);
-    const { stdout } = await run7za(path7za, ["x", "-so", "-spd", archivePath, entry.sourcePath], {
-      encoding: "buffer", windowsHide: true, maxBuffer: PREVIEW_LIMIT + 1024, timeout: 30000
+    const extractor = spawn(path7za, ["x", "-so", "-spd", archivePath, entry.sourcePath], {
+      stdio: ["ignore", "pipe", "ignore"], windowsHide: true
     });
-    const body = stdout as unknown as Buffer;
-    if (body.byteLength > PREVIEW_LIMIT) return jsonError("미리보기는 20MB 이하 파일만 지원합니다.", 413);
+    const closed = once(extractor, "close");
+    const output = Readable.from((async function* () {
+      for await (const chunk of extractor.stdout) yield chunk;
+      const [code] = await closed as [number | null, NodeJS.Signals | null];
+      if (code !== 0) throw new Error("압축 파일에서 내용을 읽지 못했습니다.");
+    })());
+    output.on("close", () => {
+      if (!output.readableEnded && extractor.exitCode === null) extractor.kill();
+    });
     const mime = CONTENT_TYPES[getFileExtension(safePath)] ?? "application/octet-stream";
-    const responseBody = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer;
-    return new Response(responseBody, { headers: { "Cache-Control": "private, no-store", "Content-Length": String(body.byteLength), "Content-Security-Policy": "default-src 'none'; sandbox", "Content-Type": mime, "X-Content-Type-Options": "nosniff" } });
+    return new Response(Readable.toWeb(output) as ReadableStream, { headers: { "Cache-Control": "private, no-store", "Content-Length": String(entry.size), "Content-Security-Policy": "default-src 'none'; sandbox", "Content-Type": mime, "X-Content-Type-Options": "nosniff" } });
   } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
-      return jsonError("미리보기는 20MB 이하 파일만 지원합니다.", 413);
-    }
-    return NextResponse.json({ error: error instanceof Error ? error.message : "압축 파일 내부 미리보기를 열지 못했습니다." }, { status: 500 });
+    return jsonError(error instanceof Error ? error.message : "압축 파일 내부 미리보기를 열지 못했습니다.", 500);
   }
 }

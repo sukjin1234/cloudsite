@@ -31,7 +31,6 @@ const TRASH: Crumb = { id: "__trash__", name: "휴지통" };
 const FILE_DRAG = "application/x-cloud-file-ids";
 const FOLDER_DRAG = "application/x-cloud-folder-ids";
 const CHUNK_SIZE = 8 * 1024 * 1024;
-const PREVIEW_LIMIT = 20 * 1024 * 1024;
 
 async function api<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const response = await fetch(input, { ...init, credentials: "same-origin" });
@@ -299,9 +298,6 @@ export function WindowsExplorer() {
 
   async function loadPreview(file: CloudFile) {
     const requestId = ++previewRequest.current;
-    if (Number(file.size_bytes) > PREVIEW_LIMIT) {
-      setPreview({ file, message: "미리 볼 수 없습니다. 20MB 이하 파일만 미리 볼 수 있습니다.", status: "error" }); return;
-    }
     setPreview({ file, status: "loading" });
     try {
       const result = await api<{ kind: PreviewKind; url: string }>("/api/files/" + file.id + "/preview");
@@ -336,8 +332,8 @@ export function WindowsExplorer() {
     const requestId = ++previewRequest.current;
     const file: CloudFile = { ...archiveView.file, name: entry.name, mime_type: "application/octet-stream", size_bytes: entry.size };
     const kind = getPreviewKind(file.mime_type, file.name);
-    if (entry.size > PREVIEW_LIMIT || kind === "unsupported" || kind === "office" || kind === "archive") {
-      setPreview({ file, message: entry.size > PREVIEW_LIMIT ? "미리보기는 20MB 이하 파일만 지원합니다." : "이 파일 형식은 미리 볼 수 없습니다.", status: "error" }); return;
+    if (kind === "unsupported" || kind === "office" || kind === "archive") {
+      setPreview({ file, message: "이 파일 형식은 미리 볼 수 없습니다.", status: "error" }); return;
     }
     const params = new URLSearchParams({ path: entry.path });
     const url = "/api/files/" + archiveView.file.id + "/archive/content?" + params;
