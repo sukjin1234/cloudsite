@@ -134,6 +134,8 @@
 .win-sidebar-item.is-current { background: #353535; }
 .win-sidebar-item.is-drop-target { background: #23476a; outline: 1px solid #4ea5ff; }
 .win-sidebar-item .win-folder-icon { height: 19px; width: 23px; }
+.win-sidebar-item > .win-file-icon { flex: 0 0 17px !important; height: 17px; width: 17px; }
+.win-sidebar-item > .win-file-icon svg { height: 17px; width: 17px; }
 .win-sidebar-item > span:not(.win-pin) { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .win-sidebar-item .win-pin { color: #aaa; height: 13px; width: 13px; }
 .win-pinned-list { display: flex; flex: 1; flex-direction: column; gap: 2px; min-height: 0; overflow: auto; padding-top: 2px; }
@@ -236,8 +238,16 @@
 .win-preview-panel { background: #202020; border-left: 1px solid #383838; display: flex; flex-direction: column; grid-column: 3; grid-row: 3; min-height: 0; min-width: 0; position: relative; }
 .win-preview-resizer { cursor: col-resize !important; height: 100%; left: -4px; position: absolute; top: 0; width: 8px; z-index: 4; }
 .win-preview-resizer:hover { background: #62adfa !important; opacity: .6; }
+.win-text-edit-toolbar { align-items: center; background: var(--win-panel); border-bottom: 1px solid var(--win-line); display: flex; flex: 0 0 38px; gap: 6px; padding: 0 10px; }
+.win-text-edit-toolbar > span { color: var(--win-muted); flex: 1; font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.win-text-edit-toolbar button { border: 1px solid var(--win-line); min-height: 26px; padding: 0 9px; }
+.win-text-edit-toolbar button:disabled { opacity: .45; }
 .win-preview-top { align-items: stretch; background: #242424; display: flex; flex: 1 1 auto; justify-content: center; min-height: 0; overflow: auto; padding: 0; }
 .win-preview-zoom { align-items: center; display: flex; flex: 1 0 100%; height: 100%; justify-content: center; min-height: 100%; min-width: 100%; }
+.win-text-editor { background: #17191c; color: #e6edf3; display: grid; flex: 1 0 100%; font: 12px/1.65 Consolas, "Cascadia Code", monospace; grid-template-columns: 48px minmax(0, 1fr); height: 100%; min-height: 100%; min-width: 100%; overflow: hidden; }
+.win-text-editor-gutter { background: #202328; border-right: 1px solid #424851; color: #a9b7c6; font: inherit; margin: 0; overflow: hidden; padding: 12px 8px; text-align: right; user-select: none; white-space: pre; }
+.win-text-editor textarea { background: transparent; border: 0; border-radius: 0; color: inherit; font: inherit; height: 100%; min-height: 0; min-width: 0; outline: 0; overflow: auto; padding: 12px 10px; resize: none; white-space: pre; }
+.win-text-editor textarea:focus-visible { outline: 0; }
 .win-folder-summary, .win-selection-summary { align-items: center; display: flex; flex-direction: column; gap: 10px; max-width: 100%; text-align: center; }
 .win-folder-icon.is-large { height: 55px; width: 67px; }
 .win-folder-summary strong, .win-selection-summary strong { max-width: 100%; overflow-wrap: anywhere; }
@@ -320,6 +330,10 @@
 .win-shell[data-theme="light"] .win-row:hover { background: #f0f5fa; }
 .win-shell[data-theme="light"] .win-row.is-selected { background: rgba(0, 120, 212, .16); outline-color: rgba(0, 120, 212, .48); }
 .win-shell[data-theme="light"] .win-preview-panel, .win-shell[data-theme="light"] .win-preview-top { background: #f6f6f6; border-color: #ddd; }
+.win-shell[data-theme="light"] .win-text-editor { background: #fff; color: #1f2328; }
+.win-shell[data-theme="light"] .win-text-editor-gutter { background: #f3f5f7; border-color: #d8dee4; color: #57606a; }
+.win-shell[data-theme="light"] .win-text-edit-toolbar { background: #f6f6f6; border-color: #ddd; }
+.win-shell[data-theme="light"] .win-text-edit-toolbar button { border-color: #d3d3d3; }
 .win-shell[data-theme="light"] .win-preview-placeholder, .win-shell[data-theme="light"] .win-folder-summary > span, .win-shell[data-theme="light"] .win-selection-summary > span { color: #666; }
 .win-shell[data-theme="light"] .win-preview-code { background: #fff; color: #1f2328; }
 .win-shell[data-theme="light"] .win-preview-code i { background: #f3f5f7; border-color: #d8dee4; color: #57606a; }
