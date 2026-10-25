@@ -4,8 +4,6 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 RUN npm ci
-RUN chmod +x node_modules/7zip-bin/linux/*/7za
-
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build && npm prune --omit=dev
@@ -25,6 +23,7 @@ COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/.next ./.next
 COPY --from=build --chown=node:node /app/public ./public
 COPY --from=build --chown=node:node /app/next.config.mjs ./next.config.mjs
+COPY --from=build --chown=node:node /app/lib/archive-worker.cjs ./lib/archive-worker.cjs
 
 RUN mkdir -p /app/uploads && chown node:node /app/uploads
 

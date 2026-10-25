@@ -11,12 +11,12 @@ export const runtime = "nodejs";
 type TrashedFile = RowDataPacket & {
   id: string; folder_id: string | null; name: string; mime_type: string;
   size_bytes: number; created_at: string; updated_at: string; deleted_at: string; tags: string[];
-  original_path?: string;
+  original_path?: string; trash_root_id?: string; trash_root_type?: "file" | "folder";
 };
 type TrashedFolder = RowDataPacket & {
   id: string; parent_id: string | null; name: string;
   created_at: string; updated_at: string; deleted_at: string; tags: string[];
-  original_path?: string;
+  original_path?: string; trash_root_id?: string; trash_root_type?: "file" | "folder";
 };
 type FolderDepth = RowDataPacket & { id: string; depth: number };
 
@@ -57,6 +57,48 @@ export async function GET(request: Request) {
   const context = requireUser(request);
   if (isAuthError(context)) return context.errorResponse;
   try {
+    const folderId = new URL(request.url).searchParams.get("folderId");
+    if (folderId) {
+      if (!isUuid(folderId)) return jsonError("휴지통 폴더 경로가 올바르지 않습니다.");
+      const [folder] = await query<TrashedFolder>("SELECT id, parent_id, name, created_at, updated_at, deleted_at, tags FROM cloud_folders WHERE id = ? AND owner_id = ? AND deleted_at IS NOT NULL LIMIT 1", [folderId, context.user.id]);
+      if (!folder) return jsonError("휴지통 폴더를 찾을 수 없습니다.", 404);
+      const [root] = await query<RowDataPacket & { id: string }>(
+        `WITH RECURSIVE ancestors (id, parent_id, depth) AS (
+          SELECT id, parent_id, 0 FROM cloud_folders WHERE id = ? AND owner_id = ? AND deleted_at IS NOT NULL
+          UNION ALL SELECT parent.id, parent.parent_id, ancestors.depth + 1 FROM cloud_folders parent
+          JOIN ancestors ON parent.id = ancestors.parent_id WHERE parent.owner_id = ? AND parent.deleted_at IS NOT NULL
+        ) SELECT id FROM ancestors ORDER BY depth DESC LIMIT 1`,
+        [folderId, context.user.id, context.user.id]
+      );
+      const [files, folders] = await Promise.all([
+        query<TrashedFile>(
+          `WITH RECURSIVE folder_paths (id, parent_id, path_text) AS (
+            SELECT id, parent_id, CAST(CONCAT('내 클라우드 > ', name) AS CHAR(4000)) FROM cloud_folders WHERE owner_id = ? AND parent_id IS NULL
+            UNION ALL SELECT child.id, child.parent_id, CONCAT(parent_path.path_text, ' > ', child.name) FROM cloud_folders child
+            JOIN folder_paths parent_path ON child.parent_id = parent_path.id WHERE child.owner_id = ?
+          ) SELECT file_row.id, file_row.folder_id, file_row.name, file_row.mime_type, file_row.size_bytes,
+            file_row.created_at, file_row.updated_at, file_row.deleted_at, file_row.tags,
+            COALESCE(parent_path.path_text, '내 클라우드') AS original_path, ? AS trash_root_id, 'folder' AS trash_root_type
+          FROM cloud_files file_row LEFT JOIN folder_paths parent_path ON parent_path.id = file_row.folder_id
+          WHERE file_row.owner_id = ? AND file_row.folder_id = ? AND file_row.deleted_at IS NOT NULL
+          ORDER BY file_row.name`,
+          [context.user.id, context.user.id, root.id, context.user.id, folderId]
+        ),
+        query<TrashedFolder>(
+          `WITH RECURSIVE folder_paths (id, parent_id, path_text) AS (
+            SELECT id, parent_id, CAST(CONCAT('내 클라우드 > ', name) AS CHAR(4000)) FROM cloud_folders WHERE owner_id = ? AND parent_id IS NULL
+            UNION ALL SELECT child.id, child.parent_id, CONCAT(parent_path.path_text, ' > ', child.name) FROM cloud_folders child
+            JOIN folder_paths parent_path ON child.parent_id = parent_path.id WHERE child.owner_id = ?
+          ) SELECT folder.id, folder.parent_id, folder.name, folder.created_at, folder.updated_at, folder.deleted_at, folder.tags,
+            COALESCE(parent_path.path_text, '내 클라우드') AS original_path, ? AS trash_root_id, 'folder' AS trash_root_type
+          FROM cloud_folders folder LEFT JOIN folder_paths parent_path ON parent_path.id = folder.parent_id
+          WHERE folder.owner_id = ? AND folder.parent_id = ? AND folder.deleted_at IS NOT NULL
+          ORDER BY folder.name`,
+          [context.user.id, context.user.id, root.id, context.user.id, folderId]
+        )
+      ]);
+      return NextResponse.json({ files, folders });
+    }
     const [files, folders] = await Promise.all([
       query<TrashedFile>(
         `WITH RECURSIVE folder_paths (id, parent_id, path_text) AS (
@@ -69,7 +111,7 @@ export async function GET(request: Request) {
         )
         SELECT file_row.id, file_row.folder_id, file_row.name, file_row.mime_type, file_row.size_bytes,
           file_row.created_at, file_row.updated_at, file_row.deleted_at, file_row.tags,
-          COALESCE(parent_path.path_text, '내 클라우드') AS original_path
+          COALESCE(parent_path.path_text, '내 클라우드') AS original_path, file_row.id AS trash_root_id, 'file' AS trash_root_type
         FROM cloud_files file_row LEFT JOIN cloud_folders parent ON parent.id = file_row.folder_id
         LEFT JOIN folder_paths parent_path ON parent_path.id = file_row.folder_id
         WHERE file_row.owner_id = ? AND file_row.deleted_at IS NOT NULL
@@ -87,7 +129,8 @@ export async function GET(request: Request) {
           WHERE child.owner_id = ?
         )
         SELECT folder.id, folder.parent_id, folder.name, folder.created_at, folder.updated_at,
-          folder.deleted_at, folder.tags, COALESCE(parent_path.path_text, '내 클라우드') AS original_path
+          folder.deleted_at, folder.tags, COALESCE(parent_path.path_text, '내 클라우드') AS original_path,
+          folder.id AS trash_root_id, 'folder' AS trash_root_type
         FROM cloud_folders folder LEFT JOIN cloud_folders parent ON parent.id = folder.parent_id
         LEFT JOIN folder_paths parent_path ON parent_path.id = folder.parent_id
         WHERE folder.owner_id = ? AND folder.deleted_at IS NOT NULL

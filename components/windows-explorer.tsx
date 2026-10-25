@@ -12,25 +12,30 @@ import "./windows-explorer.css";
 
 type User = { id: string; username: string };
 type Crumb = { id: string | null; name: string };
-type ExplorerFile = CloudFile & { deleted_at?: string | null; original_path?: string };
-type ExplorerFolder = CloudFolder & { deleted_at?: string | null; original_path?: string };
+type ExplorerFile = CloudFile & { deleted_at?: string | null; original_path?: string; trash_root_id?: string; trash_root_type?: "file" | "folder" };
+type ExplorerFolder = CloudFolder & { deleted_at?: string | null; original_path?: string; trash_root_id?: string; trash_root_type?: "file" | "folder" };
 type Listing = { files: ExplorerFile[]; folders: ExplorerFolder[] };
-type NodeRef = { id: string; type: "file" | "folder" };
+type NodeRef = { id: string; type: "file" | "folder"; trashRootId?: string; trashRootType?: "file" | "folder" };
 type Preview =
   | { status: "idle" }
   | { status: "loading"; file: CloudFile }
   | { status: "error"; file: CloudFile; message: string }
-  | { status: "ready"; docxBuffer?: ArrayBuffer; file: CloudFile; kind: PreviewKind; spreadsheet?: SpreadsheetPreview; text?: string; url: string };
+  | { status: "blocked"; file: CloudFile; kind: PreviewKind; url: string }
+  | { status: "ready"; docxBuffer?: ArrayBuffer; file: CloudFile; kind: PreviewKind; partial?: boolean; spreadsheet?: SpreadsheetPreview; text?: string; url: string };
 type SortBy = "name" | "modified" | "type" | "size";
 type ClipboardState = { action: "copy" | "cut"; items: NodeRef[] } | null;
 type StorageUsage = { usedBytes: number; quotaBytes: number };
 type ArchiveView = { file: ExplorerFile; path: string; entries: ArchiveEntry[] };
+type UploadProgress = { current: number; total: number; fileName: string; percent: number };
+type MoveCollision = { source: NodeRef; sourceName: string; target: NodeRef; targetName: string };
 
 const HOME: Crumb = { id: null, name: "내 클라우드" };
 const TRASH: Crumb = { id: "__trash__", name: "휴지통" };
 const FILE_DRAG = "application/x-cloud-file-ids";
 const FOLDER_DRAG = "application/x-cloud-folder-ids";
 const CHUNK_SIZE = 8 * 1024 * 1024;
+const PREVIEW_LIMIT = 20 * 1024 * 1024;
+const LARGE_TEXT_PREVIEW_SIZE = 512 * 1024;
 
 async function api<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const response = await fetch(input, { ...init, credentials: "same-origin" });
@@ -38,6 +43,22 @@ async function api<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> 
   if (response.status === 401) window.dispatchEvent(new Event("cloud-session-expired"));
   if (!response.ok) throw new Error(data.error ?? "요청을 처리하지 못했습니다.");
   return data;
+}
+
+function parseLargeSpreadsheet(buffer: ArrayBuffer, signal: AbortSignal) {
+  return new Promise<SpreadsheetPreview>((resolve, reject) => {
+    const worker = new Worker("/xlsx-preview-worker.js");
+    const cleanup = () => { signal.removeEventListener("abort", abort); worker.terminate(); };
+    const abort = () => { cleanup(); reject(new DOMException("미리보기가 취소되었습니다.", "AbortError")); };
+    signal.addEventListener("abort", abort, { once: true });
+    worker.onmessage = (event: MessageEvent<{ ok: boolean; spreadsheet?: SpreadsheetPreview; error?: string }>) => {
+      cleanup();
+      if (event.data.ok && event.data.spreadsheet) resolve(event.data.spreadsheet);
+      else reject(new Error(event.data.error ?? "Excel 미리보기를 만들지 못했습니다."));
+    };
+    worker.onerror = () => { cleanup(); reject(new Error("Excel 미리보기 작업을 시작하지 못했습니다.")); };
+    worker.postMessage({ buffer }, [buffer]);
+  });
 }
 
 function keyOf(item: NodeRef) { return item.type + ":" + item.id; }
@@ -104,6 +125,7 @@ export function WindowsExplorer() {
   const [addressEditing, setAddressEditing] = useState(false);
   const [addressValue, setAddressValue] = useState("");
   const [isTrash, setIsTrash] = useState(false);
+  const [trashCrumbs, setTrashCrumbs] = useState<Crumb[]>([TRASH]);
   const [archiveView, setArchiveView] = useState<ArchiveView | null>(null);
   const [archiveSelected, setArchiveSelected] = useState<ArchiveEntry | null>(null);
   const [previewZoom, setPreviewZoom] = useState(1);
@@ -115,7 +137,9 @@ export function WindowsExplorer() {
   const [columnWidth, setColumnWidth] = useState({ modified: 180, type: 130, size: 100 });
   const [previewWidth, setPreviewWidth] = useState(320);
   const [dropFolderId, setDropFolderId] = useState<string | null>(null);
-  const [uploadProgress, setUploadProgress] = useState("");
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+  const [draggingItems, setDraggingItems] = useState<NodeRef[]>([]);
+  const [movePrompt, setMovePrompt] = useState<{ items: NodeRef[]; targetId: string | null; collisions: MoveCollision[] } | null>(null);
   const [itemsViewport, setItemsViewport] = useState({ height: 600, scrollTop: 0, width: 900 });
   const [selectionBox, setSelectionBox] = useState<{ startX: number; startY: number; x: number; y: number } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -123,10 +147,13 @@ export function WindowsExplorer() {
   const searchInput = useRef<HTMLInputElement>(null);
   const itemsViewportRef = useRef<HTMLDivElement>(null);
   const previewRequest = useRef(0);
+  const previewAbort = useRef<AbortController | null>(null);
+  const previewWorker = useRef<Worker | null>(null);
+  const uploadProgressTimer = useRef<number | null>(null);
   const previewDragY = useRef<number | null>(null);
   const creatingFolder = useRef(false);
   const resizeState = useRef<{ target: "modified" | "type" | "size" | "preview"; x: number; width: number } | null>(null);
-  const current = isTrash ? TRASH : crumbs[crumbs.length - 1] ?? HOME;
+  const current = isTrash ? trashCrumbs[trashCrumbs.length - 1] ?? TRASH : crumbs[crumbs.length - 1] ?? HOME;
 
   const loadListing = useCallback(async (folderId: string | null, search = "") => {
     setNotice("");
@@ -138,9 +165,10 @@ export function WindowsExplorer() {
     try {
       const params = new URLSearchParams();
       if (isTrash) {
-        const trashed = await api<{ files: ExplorerFile[]; folders: ExplorerFolder[] }>("/api/trash");
+        if (folderId && folderId !== TRASH.id) params.set("folderId", folderId);
+        const trashed = await api<{ files: ExplorerFile[]; folders: ExplorerFolder[] }>("/api/trash" + (params.size ? "?" + params : ""));
         setListing({ files: trashed.files, folders: trashed.folders });
-        setTrashHasItems(trashed.files.length + trashed.folders.length > 0);
+        if (!folderId || folderId === TRASH.id) setTrashHasItems(trashed.files.length + trashed.folders.length > 0);
       } else if (search.trim()) {
         params.set("q", search.trim()); params.set("scope", "current");
         if (folderId) params.set("parentId", folderId);
@@ -216,6 +244,16 @@ export function WindowsExplorer() {
   useEffect(() => { if (user) void loadStorage(); }, [loadStorage, user]);
   useEffect(() => { if (user) void loadTrashStatus(); }, [loadTrashStatus, user]);
   useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(""), 5000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+  useEffect(() => {
+    if (!authMessage) return;
+    const timer = window.setTimeout(() => setAuthMessage(""), 5000);
+    return () => window.clearTimeout(timer);
+  }, [authMessage]);
+  useEffect(() => {
     try {
       const width = Number(localStorage.getItem("windows-cloud-preview-width"));
       if (Number.isFinite(width) && width >= 280 && width <= 600) setPreviewWidth(width);
@@ -274,7 +312,9 @@ export function WindowsExplorer() {
   } : undefined;
   const selectedRefs = selected.map((key) => {
     const [type, id] = key.split(":");
-    return { id, type: type as NodeRef["type"] };
+    const itemType = type as NodeRef["type"];
+    const entry = isTrash ? itemType === "file" ? listing.files.find((file) => file.id === id) : listing.folders.find((folder) => folder.id === id) : undefined;
+    return { id, type: itemType, trashRootId: entry?.trash_root_id, trashRootType: entry?.trash_root_type };
   });
   const selectedBytes = selectedRefs.reduce((sum, item) => sum + Number(listing.files.find((file) => file.id === item.id)?.size_bytes ?? sidebarFiles.find((file) => file.id === item.id)?.size_bytes ?? 0), 0);
   const selectedFile = selected.length === 1 && selected[0].startsWith("file:") ? listing.files.find((file) => "file:" + file.id === selected[0]) ?? sidebarFiles.find((file) => "file:" + file.id === selected[0]) ?? null : null;
@@ -284,69 +324,107 @@ export function WindowsExplorer() {
   useEffect(() => {
     if (!selectedFolder) { setFolderChildCount(null); return; }
     let live = true;
-    const params = new URLSearchParams({ parentId: selectedFolder.id });
-    void api<Listing>("/api/folders?" + params).then((result) => { if (live) setFolderChildCount(result.folders.length + result.files.length); })
+    const params = new URLSearchParams(isTrash ? { folderId: selectedFolder.id } : { parentId: selectedFolder.id });
+    void api<Listing>((isTrash ? "/api/trash?" : "/api/folders?") + params).then((result) => { if (live) setFolderChildCount(result.folders.length + result.files.length); })
       .catch(() => { if (live) setFolderChildCount(null); });
     return () => { live = false; };
-  }, [selectedFolder]);
+  }, [isTrash, selectedFolder]);
   useEffect(() => {
     if (selectedFile) void loadPreview(selectedFile);
-    else setPreview({ status: "idle" });
+    else { cancelPreview(); setPreview({ status: "idle" }); }
+    return () => cancelPreview();
     // Preview follows the single selected file.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedFile?.id]);
 
-  async function loadPreview(file: CloudFile) {
+  function cancelPreview() {
+    previewAbort.current?.abort();
+    previewAbort.current = null;
+    previewRequest.current += 1;
+  }
+
+  async function loadPreview(file: CloudFile, force = false) {
+    previewAbort.current?.abort();
+    const controller = new AbortController();
+    previewAbort.current = controller;
     const requestId = ++previewRequest.current;
     setPreview({ file, status: "loading" });
     try {
-      const result = await api<{ kind: PreviewKind; url: string }>("/api/files/" + file.id + "/preview");
+      const result = await api<{ kind: PreviewKind; url: string }>("/api/files/" + file.id + "/preview", { signal: controller.signal });
+      if (requestId !== previewRequest.current) return;
+      if (result.kind === "unsupported" || result.kind === "office") {
+        setPreview({ file, message: "이 파일 형식은 미리 볼 수 없습니다.", status: "error" }); setNotice("이 파일 형식은 미리 볼 수 없습니다."); return;
+      }
+      const large = Number(file.size_bytes) >= PREVIEW_LIMIT;
+      if (large && !force) { setPreview({ file, kind: result.kind, status: "blocked", url: result.url }); return; }
       let text: string | undefined; let docxBuffer: ArrayBuffer | undefined; let spreadsheet: SpreadsheetPreview | undefined;
       if (result.kind === "text" || result.kind === "document" || result.kind === "spreadsheet") {
-        const content = await fetch(result.url, { credentials: "same-origin" });
+        const partialText = large && result.kind === "text";
+        const content = await fetch(result.url, { credentials: "same-origin", headers: partialText ? { Range: "bytes=0-" + (LARGE_TEXT_PREVIEW_SIZE - 1) } : undefined, signal: controller.signal });
         if (!content.ok) throw new Error("파일 내용을 불러오지 못했습니다.");
         if (result.kind === "text") text = await content.text();
         if (result.kind === "document") docxBuffer = await content.arrayBuffer();
-        if (result.kind === "spreadsheet") spreadsheet = await parseXlsxPreview(await content.arrayBuffer());
+        if (result.kind === "spreadsheet") {
+          const buffer = await content.arrayBuffer();
+          spreadsheet = large ? await parseLargeSpreadsheet(buffer, controller.signal) : await parseXlsxPreview(buffer);
+        }
       }
-      if (requestId === previewRequest.current) setPreview({ docxBuffer, file, kind: result.kind, spreadsheet, status: "ready", text, url: result.url });
+      if (requestId === previewRequest.current) setPreview({ docxBuffer, file, kind: result.kind, partial: large && (result.kind === "text" || result.kind === "spreadsheet"), spreadsheet, status: "ready", text, url: result.url });
     } catch (error) {
-      if (requestId === previewRequest.current) setPreview({ file, message: error instanceof Error ? error.message : "미리보기를 열지 못했습니다.", status: "error" });
+      if (!controller.signal.aborted && requestId === previewRequest.current) {
+        const message = error instanceof Error ? error.message : "미리보기를 열지 못했습니다.";
+        setPreview({ file, message, status: "error" }); setNotice(message);
+      }
     }
   }
 
   async function loadArchive(file: ExplorerFile, path = "") {
-    previewRequest.current += 1;
+    cancelPreview();
+    const controller = new AbortController();
+    previewAbort.current = controller;
+    const requestId = previewRequest.current;
     setBusy("압축 파일을 여는 중"); setNotice("");
     try {
       const params = new URLSearchParams(); if (path) params.set("path", path);
-      const result = await api<{ entries: ArchiveEntry[]; file: ExplorerFile; path: string }>("/api/files/" + file.id + "/archive" + (params.size ? "?" + params : ""));
+      const result = await api<{ entries: ArchiveEntry[]; file: ExplorerFile; path: string }>("/api/files/" + file.id + "/archive" + (params.size ? "?" + params : ""), { signal: controller.signal });
+      if (controller.signal.aborted || requestId !== previewRequest.current) return;
       setArchiveView({ file: result.file, path: result.path, entries: result.entries });
       setArchiveSelected(null); setSelected([]); setPreview({ status: "idle" });
-    } catch (error) { setNotice(error instanceof Error ? error.message : "압축 파일을 열지 못했습니다."); }
-    finally { setBusy(""); }
+    } catch (error) { if (!controller.signal.aborted) setNotice(error instanceof Error ? error.message : "압축 파일을 열지 못했습니다."); }
+    finally { if (requestId === previewRequest.current) setBusy(""); }
   }
 
-  async function loadArchivePreview(entry: ArchiveEntry) {
+  async function loadArchivePreview(entry: ArchiveEntry, force = false) {
     if (!archiveView || entry.type !== "file") return;
+    previewAbort.current?.abort();
+    const controller = new AbortController();
+    previewAbort.current = controller;
     const requestId = ++previewRequest.current;
     const file: CloudFile = { ...archiveView.file, name: entry.name, mime_type: "application/octet-stream", size_bytes: entry.size };
     const kind = getPreviewKind(file.mime_type, file.name);
     if (kind === "unsupported" || kind === "office" || kind === "archive") {
-      setPreview({ file, message: "이 파일 형식은 미리 볼 수 없습니다.", status: "error" }); return;
+      setPreview({ file, message: "이 파일 형식은 미리 볼 수 없습니다.", status: "error" }); setNotice("이 파일 형식은 미리 볼 수 없습니다."); return;
     }
+    if (entry.size >= PREVIEW_LIMIT && !force) { setPreview({ file, kind, status: "blocked", url: "" }); return; }
     const params = new URLSearchParams({ path: entry.path });
     const url = "/api/files/" + archiveView.file.id + "/archive/content?" + params;
     setPreview({ file, status: "loading" });
     try {
-      const content = await fetch(url, { credentials: "same-origin" });
+      const partialText = entry.size >= PREVIEW_LIMIT && kind === "text";
+      const content = await fetch(url, { credentials: "same-origin", headers: partialText ? { Range: "bytes=0-" + (LARGE_TEXT_PREVIEW_SIZE - 1) } : undefined, signal: controller.signal });
       if (!content.ok) throw new Error((await content.json().catch(() => ({})) as { error?: string }).error ?? "압축 파일 내용을 불러오지 못했습니다.");
       let text: string | undefined; let docxBuffer: ArrayBuffer | undefined; let spreadsheet: SpreadsheetPreview | undefined;
       if (kind === "text") text = await content.text();
       if (kind === "document") docxBuffer = await content.arrayBuffer();
-      if (kind === "spreadsheet") spreadsheet = await parseXlsxPreview(await content.arrayBuffer());
-      if (requestId === previewRequest.current) setPreview({ docxBuffer, file, kind, spreadsheet, status: "ready", text, url });
-    } catch (error) { if (requestId === previewRequest.current) setPreview({ file, message: error instanceof Error ? error.message : "압축 파일 내용을 미리 볼 수 없습니다.", status: "error" }); }
+      if (kind === "spreadsheet") {
+        const buffer = await content.arrayBuffer();
+        spreadsheet = entry.size >= PREVIEW_LIMIT ? await parseLargeSpreadsheet(buffer, controller.signal) : await parseXlsxPreview(buffer);
+      }
+      if (requestId === previewRequest.current) setPreview({ docxBuffer, file, kind, partial: partialText || (entry.size >= PREVIEW_LIMIT && kind === "spreadsheet"), spreadsheet, status: "ready", text, url });
+    } catch (error) { if (!controller.signal.aborted && requestId === previewRequest.current) {
+      const message = error instanceof Error ? error.message : "압축 파일 내용을 미리 볼 수 없습니다.";
+      setPreview({ file, message, status: "error" }); setNotice(message);
+    } }
   }
 
   function openArchiveEntry(entry: ArchiveEntry) {
@@ -366,13 +444,21 @@ export function WindowsExplorer() {
       pushPath([HOME, ...result.path.map((crumb) => ({ id: crumb.id, name: crumb.name }))]);
     } catch (error) { setNotice(error instanceof Error ? error.message : "폴더를 열지 못했습니다."); }
   }
+  function navigateTrashFolder(folder: ExplorerFolder) {
+    setArchiveView(null); setArchiveSelected(null); setTrashCrumbs((path) => [...path, { id: folder.id, name: folder.name }]);
+    setSelected([]); setQuery(""); setPreview({ status: "idle" }); setSidebarOpen(false);
+  }
   function goBack() {
-    if (isTrash) { setIsTrash(false); setSelected([]); setQuery(""); return; }
     if (archiveView) {
       const parent = archiveView.path.split("/").filter(Boolean).slice(0, -1).join("/");
       if (archiveView.path) void loadArchive(archiveView.file, parent);
-      else { setArchiveView(null); setArchiveSelected(null); setPreview({ status: "idle" }); }
+      else { cancelPreview(); setArchiveView(null); setArchiveSelected(null); setPreview({ status: "idle" }); }
       return;
+    }
+    if (isTrash) {
+      if (trashCrumbs.length > 1) setTrashCrumbs((path) => path.slice(0, -1));
+      else setIsTrash(false);
+      setSelected([]); setQuery(""); setPreview({ status: "idle" }); return;
     }
     if (crumbs.length <= 1) return;
     const parentPath = crumbs.slice(0, -1);
@@ -388,19 +474,22 @@ export function WindowsExplorer() {
   }
   function goUp() { goBack(); }
   function chooseCrumb(index: number) {
-    if (isTrash) return;
+    if (isTrash) {
+      setTrashCrumbs((path) => path.slice(0, index + 1)); setSelected([]); setPreview({ status: "idle" }); setQuery(""); setArchiveView(null); setArchiveSelected(null); return;
+    }
     setArchiveView(null); setArchiveSelected(null); setCrumbMenu(null); setSelected([]); setPreview({ status: "idle" }); setQuery("");
     setCrumbs(index === 0 ? [HOME] : crumbs.slice(0, index + 1));
   }
   function chooseAddressCrumb(index: number) {
     if (!archiveView) { chooseCrumb(index); return; }
-    if (index < crumbs.length) { chooseCrumb(index); return; }
-    const depth = index - crumbs.length;
+    const baseCrumbs = isTrash ? trashCrumbs : crumbs;
+    if (index < baseCrumbs.length) { chooseCrumb(index); return; }
+    const depth = index - baseCrumbs.length;
     const path = archiveView.path.split("/").filter(Boolean).slice(0, depth).join("/");
     void loadArchive(archiveView.file, path);
   }
   function showTrash() {
-    setIsTrash(true); setArchiveView(null); setArchiveSelected(null); setSelected([]); setQuery(""); setAddressEditing(false); setCrumbMenu(null); setContextMenu(null); setNewFolderDraft(false); setEditName(null);
+    setIsTrash(true); setTrashCrumbs([TRASH]); setArchiveView(null); setArchiveSelected(null); setSelected([]); setQuery(""); setAddressEditing(false); setCrumbMenu(null); setContextMenu(null); setNewFolderDraft(false); setEditName(null);
   }
   async function showChildFolders(index: number) {
     const params = new URLSearchParams();
@@ -412,8 +501,21 @@ export function WindowsExplorer() {
   }
   async function commitAddress() {
     const rawAddress = addressValue.trim();
-    if (rawAddress.toLocaleLowerCase() === "휴지통") { showTrash(); setAddressEditing(false); return; }
     const names = rawAddress.split(/[>/\\]+/).map((part) => part.trim()).filter((name) => name && name !== "Root" && name !== "내 클라우드");
+    if (names[0]?.toLocaleLowerCase() === "휴지통") {
+      try {
+        const path: Crumb[] = [TRASH];
+        let folderId: string | null = null;
+        for (const name of names.slice(1)) {
+          const params = new URLSearchParams(); if (folderId) params.set("folderId", folderId);
+          const children = await api<Listing>("/api/trash" + (params.size ? "?" + params : ""));
+          const folder = children.folders.find((entry) => entry.name.toLowerCase() === name.toLowerCase());
+          if (!folder) throw new Error("경로를 찾을 수 없습니다.");
+          path.push({ id: folder.id, name: folder.name }); folderId = folder.id;
+        }
+        setIsTrash(true); setTrashCrumbs(path); setArchiveView(null); setArchiveSelected(null); setSelected([]); setQuery(""); setAddressEditing(false); return;
+      } catch { setAddressEditing(false); setNotice("'" + rawAddress + "'을(를) 찾을 수 없습니다."); return; }
+    }
     let parentId: string | null = null; const path: Crumb[] = [HOME];
     try {
       for (const name of names) {
@@ -426,7 +528,7 @@ export function WindowsExplorer() {
       setAddressEditing(false); pushPath(path);
     } catch {
       setAddressEditing(false);
-      window.alert("'" + rawAddress + "'을(를) 찾을 수 없습니다.");
+      setNotice("'" + rawAddress + "'을(를) 찾을 수 없습니다.");
     }
   }
   function changeSelection(type: NodeRef["type"], id: string, event: MouseEvent) {
@@ -439,7 +541,17 @@ export function WindowsExplorer() {
     else setSelected([key]);
   }
   function openNode(item: NodeRef) {
-    if (isTrash) return;
+    if (isTrash) {
+      if (item.type === "folder") {
+        const folder = listing.folders.find((entry) => entry.id === item.id);
+        if (folder) navigateTrashFolder(folder);
+      } else {
+        const file = listing.files.find((entry) => entry.id === item.id);
+        if (file && getPreviewKind(file.mime_type, file.name) === "archive") void loadArchive(file);
+        else if (file) void loadPreview(file);
+      }
+      return;
+    }
     if (item.type === "folder") {
       const folder = listing.folders.find((entry) => entry.id === item.id) ?? pinned.find((entry) => entry.id === item.id);
       if (folder) void navigate(folder);
@@ -508,12 +620,14 @@ export function WindowsExplorer() {
     if (!items.length) return;
     setBusy("복원하는 중"); setNotice("");
     try {
-      for (const item of items) await api("/api/trash", {
+      const roots = trashRootItems(items);
+      for (const item of roots) await api("/api/trash", {
         body: JSON.stringify({ action: "restore", id: item.id, type: item.type }),
         headers: { "Content-Type": "application/json" }, method: "POST"
       });
       setSelected([]); setPreview({ status: "idle" });
-      await Promise.all([loadListing(current.id, ""), loadPinned(), loadStorage(), loadTrashStatus()]);
+      if (isTrash) setTrashCrumbs([TRASH]);
+      await Promise.all([loadListing(isTrash ? TRASH.id : current.id, ""), loadPinned(), loadStorage(), loadTrashStatus()]);
     } catch (error) { setNotice(error instanceof Error ? error.message : "항목을 복원하지 못했습니다."); }
     finally { setBusy(""); }
   }
@@ -521,15 +635,17 @@ export function WindowsExplorer() {
     if (!items.length || !window.confirm(items.length + "개 항목을 영구 삭제합니다. 되돌릴 수 없습니다. 계속할까요?")) return;
     setBusy("영구 삭제하는 중"); setNotice("");
     try {
-      for (const item of items) await api("/api/trash", {
+      for (const item of trashRootItems(items)) await api("/api/trash", {
         body: JSON.stringify({ action: "delete", id: item.id, type: item.type }),
         headers: { "Content-Type": "application/json" }, method: "POST"
       });
       setSelected([]); setPreview({ status: "idle" });
-      await Promise.all([loadListing(null, ""), loadPinned(), loadStorage(), loadTrashStatus()]);
+      if (isTrash) setTrashCrumbs([TRASH]);
+      await Promise.all([loadListing(isTrash ? TRASH.id : null, ""), loadPinned(), loadStorage(), loadTrashStatus()]);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "영구 삭제하지 못했습니다.");
-      await Promise.all([loadListing(null, ""), loadStorage(), loadTrashStatus()]);
+      if (isTrash) setTrashCrumbs([TRASH]);
+      await Promise.all([loadListing(isTrash ? TRASH.id : null, ""), loadStorage(), loadTrashStatus()]);
     } finally { setBusy(""); }
   }
   async function emptyTrash() {
@@ -538,11 +654,22 @@ export function WindowsExplorer() {
     try {
       await api("/api/trash", { method: "DELETE" });
       setSelected([]); setPreview({ status: "idle" });
-      await Promise.all([loadListing(null, ""), loadPinned(), loadStorage(), loadTrashStatus()]);
+      setTrashCrumbs([TRASH]);
+      await Promise.all([loadListing(TRASH.id, ""), loadPinned(), loadStorage(), loadTrashStatus()]);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "휴지통을 비우지 못했습니다.");
-      await Promise.all([loadListing(null, ""), loadStorage(), loadTrashStatus()]);
+      await Promise.all([loadListing(TRASH.id, ""), loadStorage(), loadTrashStatus()]);
     } finally { setBusy(""); }
+  }
+  function trashRootItems(items: NodeRef[]) {
+    const roots = new Map<string, NodeRef>();
+    for (const item of items) {
+      const entry = item.type === "file" ? listing.files.find((file) => file.id === item.id) : listing.folders.find((folder) => folder.id === item.id);
+      const id = item.trashRootId ?? entry?.trash_root_id ?? item.id;
+      const type = item.trashRootType ?? entry?.trash_root_type ?? item.type;
+      roots.set(type + ":" + id, { id, type });
+    }
+    return [...roots.values()];
   }
   async function ensureFolderPath(parts: string[]) {
     let parentId = current.id;
@@ -563,7 +690,10 @@ export function WindowsExplorer() {
   async function uploadFiles(fileList: FileList | File[] | null, targetId = current.id) {
     if (isTrash) return;
     if (!fileList?.length) return;
-    const files = Array.from(fileList); setBusy(files.length + "개 항목 업로드 중"); setNotice("");
+    const files = Array.from(fileList); setNotice("");
+    let completed = false;
+    if (uploadProgressTimer.current !== null) window.clearTimeout(uploadProgressTimer.current);
+    setUploadProgress({ current: 1, total: files.length, fileName: files[0].name, percent: 0 });
     try {
       for (const [index, file] of files.entries()) {
         const relative = String((file as File & { webkitRelativePath?: string }).webkitRelativePath ?? "");
@@ -586,17 +716,20 @@ export function WindowsExplorer() {
         }
         while (offset < file.size) {
           const end = Math.min(file.size, offset + CHUNK_SIZE);
-          setUploadProgress((index + 1) + "/" + files.length + " · " + Math.floor(offset / Math.max(file.size, 1) * 100) + "%");
           offset = (await api<{ offset: number }>("/api/uploads/" + uploadId, {
             body: file.slice(offset, end), headers: { "Upload-Offset": String(offset) }, method: "PUT"
           })).offset;
+          setUploadProgress({ current: index + 1, total: files.length, fileName: name, percent: Math.floor(offset / Math.max(file.size, 1) * 100) });
         }
         await api("/api/uploads/" + uploadId, { method: "POST" }); localStorage.removeItem(key);
+        setUploadProgress({ current: index + 1, total: files.length, fileName: name, percent: 100 });
       }
       await Promise.all([loadListing(current.id, query), loadPinned(), loadStorage()]);
+      completed = true;
+      uploadProgressTimer.current = window.setTimeout(() => setUploadProgress(null), 1500);
     } catch (error) { setNotice(error instanceof Error ? error.message : "업로드에 실패했습니다."); }
     finally {
-      setBusy(""); setUploadProgress("");
+      if (!completed) setUploadProgress(null);
       if (fileInput.current) fileInput.current.value = "";
       if (folderInput.current) folderInput.current.value = "";
     }
@@ -608,15 +741,64 @@ export function WindowsExplorer() {
     });
   }
   function itemDragStart(event: DragEvent<HTMLElement>, item: NodeRef) {
-    const ids = selected.includes(keyOf(item)) ? selectedRefs.filter((entry) => entry.type === item.type).map((entry) => entry.id) : [item.id];
+    const items = selected.includes(keyOf(item)) ? selectedRefs : [{ id: item.id, type: item.type }];
+    setDraggingItems(items);
     event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData(item.type === "file" ? FILE_DRAG : FOLDER_DRAG, JSON.stringify(ids));
+    event.dataTransfer.setData(FILE_DRAG, JSON.stringify(items.filter((entry) => entry.type === "file").map((entry) => entry.id)));
+    event.dataTransfer.setData(FOLDER_DRAG, JSON.stringify(items.filter((entry) => entry.type === "folder").map((entry) => entry.id)));
+  }
+  function invalidMoveTarget(items: NodeRef[], targetId: string | null) {
+    return items.some((item) => item.type === "folder" && (item.id === targetId || crumbs.some((crumb) => crumb.id === item.id)));
   }
   function dropOver(event: DragEvent<HTMLElement>, targetId: string | null) {
+    if (isTrash) return;
     if ([FILE_DRAG, FOLDER_DRAG, "Files"].some((type) => event.dataTransfer.types.includes(type))) {
-      event.preventDefault(); event.dataTransfer.dropEffect = event.dataTransfer.types.includes("Files") ? "copy" : "move";
-      setDropFolderId(targetId ?? "root");
+      const internal = event.dataTransfer.types.includes(FILE_DRAG) || event.dataTransfer.types.includes(FOLDER_DRAG);
+      const allowed = !internal || !invalidMoveTarget(draggingItems, targetId);
+      event.preventDefault(); event.dataTransfer.dropEffect = allowed ? event.dataTransfer.types.includes("Files") && !internal ? "copy" : "move" : "none";
+      setDropFolderId(allowed ? targetId ?? "root" : null);
     }
+  }
+  function getNodeName(item: NodeRef) {
+    return item.type === "file"
+      ? listing.files.find((entry) => entry.id === item.id)?.name ?? sidebarFiles.find((entry) => entry.id === item.id)?.name
+      : listing.folders.find((entry) => entry.id === item.id)?.name ?? pinned.find((entry) => entry.id === item.id)?.name;
+  }
+  async function executeMove(items: NodeRef[], targetId: string | null, collisions: MoveCollision[] = [], overwrite = false) {
+    setMovePrompt(null); setBusy("이동하는 중");
+    try {
+      if (overwrite) {
+        const removed = new Set<string>();
+        for (const collision of collisions) {
+          const key = keyOf(collision.target);
+          if (!removed.has(key)) {
+            await api("/api/" + (collision.target.type === "folder" ? "folders" : "files") + "/" + collision.target.id, { method: "DELETE" });
+            removed.add(key);
+          }
+        }
+      }
+      for (const item of items) await moveNode(item, targetId);
+      setSelected([]);
+      await Promise.all([loadListing(current.id, query), loadPinned(), loadStorage(), loadTrashStatus()]);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "항목을 이동하지 못했습니다."); }
+    finally { setBusy(""); setDraggingItems([]); }
+  }
+  async function requestMove(items: NodeRef[], targetId: string | null) {
+    if (!items.length || invalidMoveTarget(items, targetId)) return;
+    try {
+      const params = new URLSearchParams(); if (targetId) params.set("parentId", targetId);
+      const destination = await api<Listing>("/api/folders" + (params.size ? "?" + params : ""));
+      const collisions: MoveCollision[] = [];
+      for (const source of items) {
+        const name = getNodeName(source);
+        if (!name) continue;
+        const target = [...destination.folders.map((entry) => ({ id: entry.id, type: "folder" as const, name: entry.name })), ...destination.files.map((entry) => ({ id: entry.id, type: "file" as const, name: entry.name }))]
+          .find((entry) => entry.name.toLocaleLowerCase() === name.toLocaleLowerCase() && entry.id !== source.id);
+        if (target) collisions.push({ source, sourceName: name, target: { id: target.id, type: target.type }, targetName: target.name });
+      }
+      if (collisions.length) setMovePrompt({ items, targetId, collisions });
+      else await executeMove(items, targetId);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "대상 폴더를 확인하지 못했습니다."); }
   }
   async function dropOnFolder(event: DragEvent<HTMLElement>, targetId: string | null) {
     event.preventDefault(); event.stopPropagation(); setDropFolderId(null);
@@ -624,11 +806,9 @@ export function WindowsExplorer() {
     if (event.dataTransfer.files.length) { await uploadFiles(event.dataTransfer.files, targetId); return; }
     const files = JSON.parse(event.dataTransfer.getData(FILE_DRAG) || "[]") as string[];
     const folders = JSON.parse(event.dataTransfer.getData(FOLDER_DRAG) || "[]") as string[];
-    try {
-      for (const id of files) await moveNode({ id, type: "file" }, targetId);
-      for (const id of folders) await moveNode({ id, type: "folder" }, targetId);
-      setSelected([]); await Promise.all([loadListing(current.id, query), loadPinned(), loadStorage()]);
-    } catch (error) { setNotice(error instanceof Error ? error.message : "항목을 이동하지 못했습니다."); }
+    const items: NodeRef[] = [...files.map((id) => ({ id, type: "file" as const })), ...folders.map((id) => ({ id, type: "folder" as const }))];
+    await requestMove(items, targetId);
+    setDraggingItems([]);
   }
   function beginRename(item: NodeRef) {
     const sidebarFile = item.type === "file" && !listing.files.some((file) => file.id === item.id) ? sidebarFiles.find((file) => file.id === item.id) : undefined;
@@ -724,7 +904,7 @@ export function WindowsExplorer() {
     function shortcuts(event: globalThis.KeyboardEvent) {
       if (!user) return;
       const typing = event.target instanceof HTMLElement && ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName);
-      if (event.key === "Escape") { setContextMenu(null); setNewMenu(false); setSortMenu(false); setCompressMenu(false); setCrumbMenu(null); setAddressEditing(false); return; }
+      if (event.key === "Escape") { setContextMenu(null); setMovePrompt(null); setNewMenu(false); setSortMenu(false); setCompressMenu(false); setCrumbMenu(null); setAddressEditing(false); return; }
       if (typing) return;
       if ((event.ctrlKey || event.metaKey) && ["+", "=", "-", "_", "Add", "Subtract"].includes(event.key)) {
         event.preventDefault(); setPreviewZoom((value) => Math.max(0.5, Math.min(3, value + (["-", "_", "Subtract"].includes(event.key) ? -0.1 : 0.1)))); return;
@@ -779,28 +959,34 @@ export function WindowsExplorer() {
     <Image alt="" aria-hidden="true" height={48} src="/brand-icon.png" width={48} /><h1>내 클라우드</h1>
     <label>아이디<input autoComplete="username" autoCapitalize="none" onChange={(event) => setUsername(event.target.value)} required value={username} /></label>
     <label>비밀번호<input autoComplete="current-password" onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></label>
-    {authMessage ? <p role="alert">{authMessage}</p> : null}<button disabled={authBusy} type="submit">{authBusy ? "로그인 중…" : "로그인"}</button>
-  </form></main>;
+    <button disabled={authBusy} type="submit">{authBusy ? "로그인 중…" : "로그인"}</button>
+  </form>{authMessage ? <div className="win-toast win-login-toast" role="alert"><span>{authMessage}</span><button aria-label="알림 닫기" onClick={() => setAuthMessage("")} type="button"><X /></button></div> : null}</main>;
 
   const resizeColumn = (target: "modified" | "type" | "size", event: PointerEvent<HTMLButtonElement>) => {
     event.preventDefault(); resizeState.current = { target, x: event.clientX, width: columnWidth[target] };
     document.body.classList.add("win-is-resizing");
   };
   const selectedLabel = archiveView ? archiveSelected ? "1개 항목 선택함" + (archiveSelected.size ? "  " + formatFileSize(archiveSelected.size) : "") : archiveView.entries.length + "개 항목" : selected.length ? selected.length + "개 항목 선택함" + (selectedBytes ? "  " + formatFileSize(selectedBytes) : "") : totalItems + "개 항목";
-  const addressCrumbs = isTrash ? [TRASH] : archiveView ? [...crumbs, { id: "__archive__", name: archiveView.file.name }, ...archiveView.path.split("/").filter(Boolean).map((name, index) => ({ id: "__archive_path_" + index, name }))] : crumbs;
+  const baseCrumbs = isTrash ? trashCrumbs : crumbs;
+  const addressCrumbs = archiveView ? [...baseCrumbs, { id: "__archive__", name: archiveView.file.name }, ...archiveView.path.split("/").filter(Boolean).map((name, index) => ({ id: "__archive_path_" + index, name }))] : baseCrumbs;
+  const showSidebarItems = isTrash ? trashCrumbs.length === 1 : !archiveView && crumbs.length === 1;
   const usedGb = (storage.usedBytes / (1024 ** 3)).toFixed(3);
   const quotaGb = (storage.quotaBytes / (1024 ** 3)).toFixed(2);
 
   return <main className={"win-shell " + (sidebarOpen ? "is-sidebar-open " : "")} data-theme={theme} onDragOver={(event) => !archiveView && dropOver(event, isTrash ? null : current.id)} onDrop={(event) => !archiveView && void dropOnFolder(event, isTrash ? null : current.id)} style={{ "--win-preview-width": previewWidth + "px", "--win-modified-width": columnWidth.modified + "px", "--win-type-width": columnWidth.type + "px", "--win-size-width": columnWidth.size + "px" } as CSSProperties}>
     <input className="win-hidden" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => void uploadFiles(event.target.files)} ref={fileInput} type="file" />
     <input className="win-hidden" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => void uploadFiles(event.target.files)} ref={folderInput} type="file" {...({ webkitdirectory: "" } as InputHTMLAttributes<HTMLInputElement>)} />
+    {notice || busy ? <div className={"win-toast " + (notice ? "is-error" : "")} role={notice ? "alert" : "status"}>
+      {notice ? <span>{notice}</span> : <><LoaderCircle className="win-spin" /><span>{busy}</span></>}
+      {notice ? <button aria-label="알림 닫기" onClick={() => setNotice("")} type="button"><X /></button> : null}
+    </div> : null}
 
     <header className="win-navigation">
       <button aria-label="사이드바 열기" className="win-mobile-sidebar-toggle" onClick={() => setSidebarOpen(true)} type="button"><Menu /></button>
       <div className="win-nav-buttons">
-        <button aria-label="뒤로" disabled={!isTrash && !archiveView && crumbs.length <= 1} onClick={goBack} title="뒤로" type="button"><ArrowLeft /></button>
+        <button aria-label="뒤로" disabled={isTrash ? trashCrumbs.length <= 1 && !archiveView : !archiveView && crumbs.length <= 1} onClick={goBack} title="뒤로" type="button"><ArrowLeft /></button>
         <button aria-label="앞으로" disabled={isTrash || archiveView !== null || historyIndex >= history.length - 1} onClick={goForward} title="앞으로" type="button"><ArrowRight /></button>
-        <button aria-label="상위 폴더" disabled={!isTrash && !archiveView && crumbs.length <= 1} onClick={goUp} title="상위 폴더" type="button"><ArrowUp /></button>
+        <button aria-label="상위 폴더" disabled={isTrash ? trashCrumbs.length <= 1 && !archiveView : !archiveView && crumbs.length <= 1} onClick={goUp} title="상위 폴더" type="button"><ArrowUp /></button>
         <button aria-label="새로 고침" onClick={() => void refresh()} title="새로 고침" type="button"><RefreshCw /></button>
       </div>
       <div className={"win-address " + (addressEditing ? "is-editing" : "")} onClick={(event) => { if ((event.target as HTMLElement).closest("button,input")) return; setAddressValue(addressCrumbs.map((crumb) => crumb.name).join(" > ")); setAddressEditing(true); }}>
@@ -853,15 +1039,15 @@ export function WindowsExplorer() {
     </nav>
 
     <aside className="win-sidebar">
-      <div className="win-sidebar-heading">{isTrash ? "삭제된 항목" : "고정됨"}</div>
+      {showSidebarItems ? <div className="win-sidebar-heading">{isTrash ? "삭제된 항목" : "고정됨"}</div> : null}
       <div className="win-pinned-list">
-        {isTrash ? <>
-          {listing.folders.map((folder) => <button className={"win-sidebar-item " + (selected.includes("folder:" + folder.id) ? "is-current" : "")} key={folder.id} onClick={() => { setSidebarOpen(false); setSelected(["folder:" + folder.id]); }} onContextMenu={(event) => showItemContext(event, { id: folder.id, type: "folder" })} type="button"><ExplorerFolderIcon /><span title={folder.name}>{folder.name}</span></button>)}
+        {showSidebarItems ? isTrash ? <>
+          {listing.folders.map((folder) => <button className={"win-sidebar-item " + (selected.includes("folder:" + folder.id) ? "is-current" : "")} key={folder.id} onClick={() => navigateTrashFolder(folder)} onContextMenu={(event) => showItemContext(event, { id: folder.id, type: "folder" })} type="button"><ExplorerFolderIcon /><span title={folder.name}>{folder.name}</span></button>)}
           {listing.files.map((file) => <button className={"win-sidebar-item " + (selected.includes("file:" + file.id) ? "is-current" : "")} key={file.id} onClick={() => { setSidebarOpen(false); setSelected(["file:" + file.id]); }} onContextMenu={(event) => showItemContext(event, { id: file.id, type: "file" })} type="button"><span className={"win-file-icon win-file-" + getPreviewKind(file.mime_type, file.name)}><FileKindIcon file={file} /></span><span title={file.name}>{file.name}</span></button>)}
         </> : <>
-          {pinned.map((folder) => <button className={"win-sidebar-item " + (current.id === folder.id ? "is-current " : "") + (dropFolderId === folder.id ? " is-drop-target" : "")} key={folder.id} onClick={() => { setSidebarOpen(false); void navigate(folder); }} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, pinned: folder }); }} onDragOver={(event) => dropOver(event, folder.id)} onDrop={(event) => void dropOnFolder(event, folder.id)} type="button"><ExplorerFolderIcon /><span title={folder.name}>{folder.name}</span><Pin aria-hidden="true" className="win-pin" /></button>)}
-          {sidebarFiles.map((file) => <button className={"win-sidebar-item " + (selected.includes("file:" + file.id) ? "is-current" : "")} key={file.id} onClick={() => { setSidebarOpen(false); setSelected(["file:" + file.id]); }} onDoubleClick={() => openNode({ id: file.id, type: "file" })} onContextMenu={(event) => showItemContext(event, { id: file.id, type: "file" })} type="button"><span className={"win-file-icon win-file-" + getPreviewKind(file.mime_type, file.name)}><FileKindIcon file={file} /></span><span title={file.name}>{file.name}</span></button>)}
-        </>}
+          {pinned.map((folder) => <button className={"win-sidebar-item " + (current.id === folder.id ? "is-current " : "") + (dropFolderId === folder.id ? " is-drop-target" : "")} draggable key={folder.id} onClick={() => { setSidebarOpen(false); void navigate(folder); }} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, pinned: folder }); }} onDragStart={(event) => itemDragStart(event, { id: folder.id, type: "folder" })} onDragEnd={() => { setDraggingItems([]); setDropFolderId(null); }} onDragOver={(event) => dropOver(event, folder.id)} onDrop={(event) => void dropOnFolder(event, folder.id)} type="button"><ExplorerFolderIcon /><span title={folder.name}>{folder.name}</span><Pin aria-hidden="true" className="win-pin" /></button>)}
+          {sidebarFiles.map((file) => <button className={"win-sidebar-item " + (selected.includes("file:" + file.id) ? "is-current" : "")} draggable key={file.id} onClick={() => { setSidebarOpen(false); setSelected(["file:" + file.id]); }} onDoubleClick={() => openNode({ id: file.id, type: "file" })} onContextMenu={(event) => showItemContext(event, { id: file.id, type: "file" })} onDragStart={(event) => itemDragStart(event, { id: file.id, type: "file" })} onDragEnd={() => { setDraggingItems([]); setDropFolderId(null); }} type="button"><span className={"win-file-icon win-file-" + getPreviewKind(file.mime_type, file.name)}><FileKindIcon file={file} /></span><span title={file.name}>{file.name}</span></button>)}
+        </> : null}
       </div>
       <div className="win-sidebar-footer">
         <button className="win-sidebar-item win-trash-sidebar" onClick={() => { setSidebarOpen(false); if (isTrash) { setIsTrash(false); setSelected([]); setQuery(""); } else showTrash(); }} type="button">{isTrash ? <HardDrive /> : <TrashIcon filled={trashHasItems} />}<span>{isTrash ? "내 클라우드" : "휴지통"}</span></button>
@@ -874,7 +1060,6 @@ export function WindowsExplorer() {
     {sidebarOpen ? <button aria-label="사이드바 닫기" className="win-sidebar-backdrop" onClick={() => setSidebarOpen(false)} type="button" /> : null}
 
     <section className="win-file-area" onDragOver={(event) => !archiveView && dropOver(event, current.id)} onDrop={(event) => !archiveView && void dropOnFolder(event, current.id)}>
-      {busy || uploadProgress || notice ? <div className={"win-notice " + (notice ? "is-error" : "")}>{notice || busy}{uploadProgress ? " · " + uploadProgress : ""}<button aria-label="메시지 닫기" onClick={() => setNotice("")} type="button"><X /></button></div> : null}
       {archiveView ? <>
         <div className="win-table-head" role="row"><div className="win-name-head">이름</div><div className="win-name-head">수정한 날짜</div><div className="win-name-head">유형</div><div className="win-name-head">크기</div></div>
         <div className="win-items">
@@ -895,15 +1080,15 @@ export function WindowsExplorer() {
       <div className={"win-items " + (view === "icons" ? "is-icons " : "") + (virtualized ? "is-virtualized" : "")} onClick={(event) => { if (event.target === event.currentTarget) setSelected([]); }} onPointerDown={(event) => { if (event.target === event.currentTarget) { event.preventDefault(); setSelectionBox({ startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY }); } }} onDragOver={(event) => dropOver(event, current.id)} onDrop={(event) => void dropOnFolder(event, current.id)} onScroll={(event) => setItemsViewport({ height: event.currentTarget.clientHeight, scrollTop: event.currentTarget.scrollTop, width: event.currentTarget.clientWidth })} ref={itemsViewportRef} style={virtualized ? { height: Math.ceil(totalItems / virtualColumns) * virtualRowHeight, flex: "0 0 auto" } : undefined}>
         {selectionBox ? <div aria-hidden="true" className="win-selection-rectangle" style={{ left: Math.min(selectionBox.startX, selectionBox.x), top: Math.min(selectionBox.startY, selectionBox.y), width: Math.abs(selectionBox.x - selectionBox.startX), height: Math.abs(selectionBox.y - selectionBox.startY) }} /> : null}
         {newFolderDraft ? <div className={"win-row " + (view === "icons" ? "win-tile" : "")}><ExplorerFolderIcon /><input aria-label="새 폴더 이름" data-new-folder-input value={editName?.value ?? "새 폴더"} onChange={(event) => setEditName({ key: "new-folder", value: event.target.value })} onBlur={() => { if (newFolderDraft) void saveNewFolder(editName?.value ?? "새 폴더"); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void saveNewFolder(editName?.value ?? "새 폴더"); } if (event.key === "Escape") { setNewFolderDraft(false); setEditName(null); } }} /></div> : null}
-        {renderFolders.map((folder, localIndex) => { const index = visibleStart + localIndex; return <div aria-selected={selected.includes("folder:" + folder.id)} className={"win-row " + (view === "icons" ? "win-tile " : "") + (selected.includes("folder:" + folder.id) ? "is-selected " : "") + (dropFolderId === folder.id ? "is-drop-target" : "")} data-item-key={"folder:" + folder.id} draggable={!isTrash} onClick={(event) => changeSelection("folder", folder.id, event)} onContextMenu={(event) => showItemContext(event, { id: folder.id, type: "folder" })} onDoubleClick={() => openNode({ id: folder.id, type: "folder" })} onDragStart={(event) => itemDragStart(event, { id: folder.id, type: "folder" })} onDragOver={(event) => dropOver(event, folder.id)} onDrop={(event) => void dropOnFolder(event, folder.id)} key={folder.id} role="row" style={virtualStyle(index)} tabIndex={0}>
+        {renderFolders.map((folder, localIndex) => { const index = visibleStart + localIndex; return <div aria-selected={selected.includes("folder:" + folder.id)} className={"win-row " + (view === "icons" ? "win-tile " : "") + (selected.includes("folder:" + folder.id) ? "is-selected " : "") + (dropFolderId === folder.id ? "is-drop-target" : "")} data-item-key={"folder:" + folder.id} draggable={!isTrash} onClick={(event) => changeSelection("folder", folder.id, event)} onContextMenu={(event) => showItemContext(event, { id: folder.id, type: "folder" })} onDoubleClick={() => openNode({ id: folder.id, type: "folder" })} onDragStart={(event) => itemDragStart(event, { id: folder.id, type: "folder" })} onDragEnd={() => { setDraggingItems([]); setDropFolderId(null); }} onDragOver={(event) => dropOver(event, folder.id)} onDrop={(event) => void dropOnFolder(event, folder.id)} key={folder.id} role="row" style={virtualStyle(index)} tabIndex={0}>
           <div className="win-cell win-cell-name"><ExplorerFolderIcon />{editName?.key === "folder:" + folder.id ? <input aria-label="폴더 이름" data-edit-key={"folder:" + folder.id} value={editName.value} onBlur={() => void commitRename({ id: folder.id, type: "folder" }, editName.value)} onChange={(event) => setEditName({ ...editName, value: event.target.value })} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void commitRename({ id: folder.id, type: "folder" }, editName.value); } if (event.key === "Escape") setEditName(null); }} /> : <span title={folder.name}>{folder.name}</span>}</div>
           <span className="win-cell win-cell-modified">{isTrash ? (folder.original_path ?? "내 클라우드") : dateLabel(folder.updated_at)}</span><span className="win-cell win-cell-type">{isTrash ? dateLabel(folder.deleted_at ?? folder.updated_at) : "파일 폴더"}</span><span className="win-cell win-cell-size" />
         </div>; })}
-        {renderFiles.map((file, localIndex) => { const index = visibleFolders.length + firstFileIndex + localIndex; return <div aria-selected={selected.includes("file:" + file.id)} className={"win-row " + (view === "icons" ? "win-tile " : "") + (selected.includes("file:" + file.id) ? "is-selected" : "")} data-item-key={"file:" + file.id} draggable={!isTrash} onClick={(event) => changeSelection("file", file.id, event)} onContextMenu={(event) => showItemContext(event, { id: file.id, type: "file" })} onDoubleClick={() => openNode({ id: file.id, type: "file" })} onDragStart={(event) => itemDragStart(event, { id: file.id, type: "file" })} key={file.id} role="row" style={virtualStyle(index)} tabIndex={0}>
+        {renderFiles.map((file, localIndex) => { const index = visibleFolders.length + firstFileIndex + localIndex; return <div aria-selected={selected.includes("file:" + file.id)} className={"win-row " + (view === "icons" ? "win-tile " : "") + (selected.includes("file:" + file.id) ? "is-selected" : "")} data-item-key={"file:" + file.id} draggable={!isTrash} onClick={(event) => changeSelection("file", file.id, event)} onContextMenu={(event) => showItemContext(event, { id: file.id, type: "file" })} onDoubleClick={() => openNode({ id: file.id, type: "file" })} onDragStart={(event) => itemDragStart(event, { id: file.id, type: "file" })} onDragEnd={() => { setDraggingItems([]); setDropFolderId(null); }} key={file.id} role="row" style={virtualStyle(index)} tabIndex={0}>
           <div className="win-cell win-cell-name">{view === "icons" && getPreviewKind(file.mime_type, file.name) === "image" ? <img alt="" className="win-icon-thumbnail" loading="lazy" src={"/api/files/" + file.id + "/content"} /> : <span className={"win-file-icon win-file-" + getPreviewKind(file.mime_type, file.name)}><FileKindIcon file={file} /></span>}{editName?.key === "file:" + file.id ? <input aria-label="파일 이름" data-edit-key={"file:" + file.id} value={editName.value} onBlur={() => void commitRename({ id: file.id, type: "file" }, editName.value)} onChange={(event) => setEditName({ ...editName, value: event.target.value })} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void commitRename({ id: file.id, type: "file" }, editName.value); } if (event.key === "Escape") setEditName(null); }} /> : <span title={file.name}>{file.name}</span>}</div>
           <span className="win-cell win-cell-modified">{isTrash ? (file.original_path ?? "내 클라우드") : dateLabel(file.updated_at)}</span><span className="win-cell win-cell-type">{isTrash ? dateLabel(file.deleted_at ?? file.updated_at) : fileType(file)}</span><span className="win-cell win-cell-size">{formatFileSize(Number(file.size_bytes))}</span>
         </div>; })}
-        {totalItems === 0 && !newFolderDraft && (isTrash || current.id !== null) ? <div className="win-empty">{isTrash ? "휴지통이 비어 있습니다." : "이 폴더는 비어 있습니다."}</div> : null}
+        {totalItems === 0 && !newFolderDraft && (isTrash || current.id !== null) ? <div className="win-empty">{isTrash && trashCrumbs.length === 1 ? "휴지통이 비어 있습니다." : "이 폴더는 비어 있습니다."}</div> : null}
       </div>
       </>}
     </section>
@@ -912,20 +1097,27 @@ export function WindowsExplorer() {
       <button aria-label="미리보기 패널 너비 조절" className="win-preview-resizer" onPointerDown={(event) => { event.preventDefault(); resizeState.current = { target: "preview", x: event.clientX, width: previewWidth }; document.body.classList.add("win-is-resizing"); }} type="button" />
       <div className="win-preview-top" onPointerDown={(event) => { if (event.ctrlKey) { event.preventDefault(); previewDragY.current = event.clientY; event.currentTarget.setPointerCapture(event.pointerId); } }} onPointerMove={(event) => { if (previewDragY.current !== null) { const delta = previewDragY.current - event.clientY; previewDragY.current = event.clientY; setPreviewZoom((value) => Math.max(0.5, Math.min(3, value + delta * 0.01))); } }} onPointerUp={() => { previewDragY.current = null; }}>
         <div className="win-preview-zoom" style={{ zoom: previewZoom }}>
-        {archiveView ? archiveSelected?.type === "file" ? <PreviewContent preview={preview} /> : archiveSelected ? <div className="win-folder-summary"><ExplorerFolderIcon className="is-large" /><strong>{archiveSelected.name}</strong><span>{archiveSelected.type === "folder" ? "폴더" : formatFileSize(archiveSelected.size)}</span></div> : <div className="win-folder-summary"><Archive className="win-archive-summary-icon" /><strong>{archiveView.file.name}</strong><span>{archiveView.entries.length}개 항목</span></div>
+        {archiveView ? archiveSelected?.type === "file" ? <PreviewContent onOpenLarge={() => preview.status === "blocked" && void loadArchivePreview(archiveSelected, true)} preview={preview} /> : archiveSelected ? <div className="win-folder-summary"><ExplorerFolderIcon className="is-large" /><strong>{archiveSelected.name}</strong><span>{archiveSelected.type === "folder" ? "폴더" : formatFileSize(archiveSelected.size)}</span></div> : <div className="win-folder-summary"><Archive className="win-archive-summary-icon" /><strong>{archiveView.file.name}</strong><span>{archiveView.entries.length}개 항목</span></div>
           : selected.length > 1 ? <div className="win-selection-summary"><div className="win-summary-icon"><FileText /></div><strong>{selected.length}개 항목 선택됨</strong><span>{formatFileSize(selectedBytes)}</span></div>
           : selectedFolder ? <div className="win-folder-summary"><ExplorerFolderIcon className="is-large" /><strong>{selectedFolder.name}</strong><span>{folderChildCount ?? 0}개 항목</span></div>
-            : selectedFile ? <PreviewContent preview={preview} />
+            : selectedFile ? <PreviewContent onOpenLarge={() => preview.status === "blocked" && (preview.kind === "archive" ? void loadArchive(selectedFile as ExplorerFile) : void loadPreview(selectedFile, true))} preview={preview} />
               : <div className="win-folder-summary"><ExplorerFolderIcon className="is-large" /><strong>{current.name}</strong><span>{totalItems}개 항목</span></div>}
         </div>
       </div>
     </aside>
 
-    <footer className="win-statusbar"><span>{selectedLabel}</span><div className="win-view-switch">
+    <footer className="win-statusbar"><span>{selectedLabel}</span>{uploadProgress ? <div aria-label="업로드 진행률" className="win-upload-progress" role="progressbar" aria-valuemax={100} aria-valuemin={0} aria-valuenow={uploadProgress.percent}>
+      <span>{uploadProgress.total > 1 ? `${uploadProgress.current}/${uploadProgress.total} 업로드 중 · ` : ""}{uploadProgress.fileName}</span><strong>{uploadProgress.percent}%</strong><i><b style={{ width: uploadProgress.percent + "%" }} /></i>
+    </div> : null}<div className="win-view-switch">
       <button aria-label="자세히 보기" aria-pressed={view === "details"} className={view === "details" ? "is-active" : ""} onClick={() => setView("details")} title="자세히" type="button"><List /></button>
       <button aria-label="큰 아이콘" aria-pressed={view === "icons"} className={view === "icons" ? "is-active" : ""} onClick={() => setView("icons")} title="큰 아이콘" type="button"><Grid2X2 /></button>
     </div></footer>
 
+    {movePrompt ? <div className="win-dialog-backdrop" onClick={() => setMovePrompt(null)}><section aria-labelledby="win-move-conflict-title" aria-modal="true" className="win-dialog" onClick={(event) => event.stopPropagation()} role="dialog">
+      <h2 id="win-move-conflict-title">같은 이름의 항목이 있습니다</h2><p>기존 항목을 덮어쓰거나, 새 이름으로 이동할 수 있습니다. 덮어쓴 항목은 휴지통으로 이동합니다.</p>
+      <div className="win-conflict-list">{movePrompt.collisions.map((collision) => <div key={keyOf(collision.source)}><span>{collision.sourceName}</span><span>→</span><span>{collision.targetName}</span></div>)}</div>
+      <div className="win-dialog-actions"><button onClick={() => setMovePrompt(null)} type="button">취소</button><button onClick={() => void executeMove(movePrompt.items, movePrompt.targetId, movePrompt.collisions, false)} type="button">이름 변경</button><button className="is-primary" onClick={() => void executeMove(movePrompt.items, movePrompt.targetId, movePrompt.collisions, true)} type="button">덮어쓰기</button></div>
+    </section></div> : null}
     {contextMenu ? <div className="win-context-backdrop" onClick={() => setContextMenu(null)}><div className="win-menu win-context-menu" onClick={(event) => event.stopPropagation()} style={{ left: Math.min(contextMenu.x, window.innerWidth - 235), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 360)) }}>
       {contextMenu.pinned ? <>
         <button onClick={() => { setContextMenu(null); void navigate(contextMenu.pinned!); }} type="button"><ExplorerFolderIcon />열기</button>
@@ -949,15 +1141,16 @@ export function WindowsExplorer() {
   </main>;
 }
 
-function PreviewContent({ preview }: { preview: Preview }) {
+function PreviewContent({ onOpenLarge, preview }: { onOpenLarge: () => void; preview: Preview }) {
   const [activeSheet, setActiveSheet] = useState(0);
-  const codeLines = useMemo(() => preview.status === "ready" && preview.kind === "text" && !preview.file.name.toLowerCase().endsWith(".csv")
+  const codeLines = useMemo(() => preview.status === "ready" && !preview.partial && preview.kind === "text" && !preview.file.name.toLowerCase().endsWith(".csv")
     ? hljs.highlightAuto(preview.text ?? "").value.split(/\r?\n/)
     : [], [preview]);
   useEffect(() => { setActiveSheet(0); }, [preview.status === "ready" ? preview.file.id : ""]);
   if (preview.status === "idle") return <div className="win-preview-placeholder"><FileText /></div>;
   if (preview.status === "loading") return <div className="win-preview-placeholder"><LoaderCircle className="win-spin" /></div>;
   if (preview.status === "error") return <div className="win-preview-placeholder"><FileKindIcon file={preview.file} /><span>{preview.message}</span></div>;
+  if (preview.status === "blocked") return <div className="win-preview-large-notice"><FileKindIcon file={preview.file} /><strong>파일이 커서 미리보기를 제한합니다</strong><span>{formatFileSize(Number(preview.file.size_bytes))}</span><button onClick={onOpenLarge} type="button">그래도 열기</button></div>;
   if (preview.kind === "archive") return <div className="win-preview-placeholder"><Archive /><span>압축 파일을 열면 내부 항목을 탐색할 수 있습니다.</span></div>;
   if (preview.kind === "image") return <img alt={preview.file.name} className="win-preview-image" src={preview.url} />;
   if (preview.kind === "pdf") return <iframe className="win-preview-frame" src={preview.url} title={preview.file.name} />;
@@ -968,14 +1161,15 @@ function PreviewContent({ preview }: { preview: Preview }) {
       const rows = (preview.text ?? "").split(/\r?\n/).slice(0, 80).map((row) => row.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).slice(0, 12));
       return <div className="win-preview-table-scroll"><table className="win-preview-table"><tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell.replace(/^"|"$/g, "")}</td>)}</tr>)}</tbody></table></div>;
     }
-    return <pre className="win-preview-code"><code>{codeLines.map((line, index) => <span key={index}><i>{index + 1}</i><b dangerouslySetInnerHTML={{ __html: line || " " }} /></span>)}</code></pre>;
+    const plainLines = preview.partial ? (preview.text ?? "").split(/\r?\n/) : [];
+    return <>{preview.partial ? <div className="win-preview-partial-note">큰 파일의 앞부분만 표시합니다.</div> : null}<pre className="win-preview-code"><code>{preview.partial ? plainLines.map((line, index) => <span key={index}><i>{index + 1}</i><b>{line || " "}</b></span>) : codeLines.map((line, index) => <span key={index}><i>{index + 1}</i><b dangerouslySetInnerHTML={{ __html: line || " " }} /></span>)}</code></pre></>;
   }
   if (preview.kind === "document" && preview.docxBuffer) return <DocxCanvas buffer={preview.docxBuffer} />;
   if (preview.kind === "spreadsheet" && preview.spreadsheet) {
     const sheet = preview.spreadsheet.sheets[Math.min(activeSheet, preview.spreadsheet.sheets.length - 1)];
     return <div className="win-spreadsheet-preview">
       <div aria-label="시트 선택" className="win-preview-sheet-tabs" role="tablist">{preview.spreadsheet.sheets.map((entry, index) => <button aria-selected={activeSheet === index} className={activeSheet === index ? "is-active" : ""} key={entry.name} onClick={() => setActiveSheet(index)} role="tab" type="button">{entry.name}</button>)}</div>
-      <div className="win-preview-table-scroll"><table className="win-preview-table"><tbody>{sheet?.rows.slice(0, 100).map((row, rowIndex) => <tr key={rowIndex}>{row.slice(0, 24).map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>)}</tbody></table></div>
+      {preview.partial ? <div className="win-preview-partial-note">큰 파일의 첫 시트 100행만 표시합니다.</div> : null}<div className="win-preview-table-scroll"><table className="win-preview-table"><tbody>{sheet?.rows.slice(0, 100).map((row, rowIndex) => <tr key={rowIndex}>{row.slice(0, 24).map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>)}</tbody></table></div>
     </div>;
   }
   return <div className="win-preview-placeholder"><FileKindIcon file={preview.file} /><span>미리 볼 수 없습니다.</span></div>;

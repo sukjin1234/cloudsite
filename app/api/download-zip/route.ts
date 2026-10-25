@@ -1,23 +1,20 @@
 import { createReadStream } from "node:fs";
 import { link, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { TarArchive, ZipArchive } from "archiver";
-import { path7za } from "7zip-bin";
 import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import { isAuthError, jsonError, requireUser } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { getStoredFilePath, getUploadRoot } from "@/lib/file-storage";
+import { runArchiveWorker } from "@/lib/archive-utils";
 import { isUuid, validateDisplayName } from "@/lib/file-utils";
 
 export const runtime = "nodejs";
 type Entry = { type: "file" | "folder"; id: string };
 type ZipFile = RowDataPacket & { id: string; name: string; archive_name: string };
 type ZipFolder = RowDataPacket & { id: string; name: string; archive_name: string };
-const run7za = promisify(execFile);
 
 function encodeFilename(name: string) {
   return encodeURIComponent(name).replace(/[\'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
@@ -124,7 +121,7 @@ export async function POST(request: Request) {
       await mkdir(stageDirectory, { recursive: true, mode: 0o700 });
       for (const folderPath of directories) await mkdir(join(stageDirectory, folderPath), { recursive: true });
       for (const file of files) await linkOrCopy(getStoredFilePath(context.user.id, file.id), join(stageDirectory, file.path));
-      await run7za(path7za, ["a", "-t7z", outputPath, "."], { cwd: stageDirectory, windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 300000 });
+      await runArchiveWorker({ type: "create", sourcePath: stageDirectory, outputPath });
       await stat(outputPath);
       workDirectory = base;
       return downloadResponse(outputPath, outputName, format);

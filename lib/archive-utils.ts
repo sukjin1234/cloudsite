@@ -1,11 +1,36 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { path7za } from "7zip-bin";
-
-const run7za = promisify(execFile);
+import { Worker } from "node:worker_threads";
+import path from "node:path";
 
 export type ArchiveEntry = { name: string; path: string; size: number; type: "file" | "folder" };
 type ListedEntry = { path: string; sourcePath: string; size: number; folder: boolean };
+type ArchiveWorkerResult = { ok: true; output: string } | { ok: false; error: string };
+
+export function runArchiveWorker(workerData: { type: "list"; archivePath: string } | { type: "extract"; archivePath: string; outputPath: string; entryPath: string } | { type: "create"; sourcePath: string; outputPath: string }, signal?: AbortSignal) {
+  return new Promise<string>((resolve, reject) => {
+    const worker = new Worker(path.join(process.cwd(), "lib", "archive-worker.cjs"), { workerData });
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      callback();
+    };
+    const abort = () => {
+      void worker.terminate();
+      finish(() => reject(new DOMException("압축 파일 작업이 취소되었습니다.", "AbortError")));
+    };
+    if (signal?.aborted) { abort(); return; }
+    signal?.addEventListener("abort", abort, { once: true });
+    worker.once("message", (result: ArchiveWorkerResult) => {
+      if (result.ok) finish(() => resolve(result.output));
+      else finish(() => reject(new Error(result.error)));
+    });
+    worker.once("error", (error) => finish(() => reject(error)));
+    worker.once("exit", (code) => {
+      if (!settled) finish(() => reject(new Error(code === 0 ? "압축 파일 작업이 중단되었습니다." : "압축 파일을 읽지 못했습니다.")));
+    });
+  });
+}
 
 export function normalizeArchivePath(value: string) {
   let normalized = value.replace(/\\/g, "/").replace(/\/$/, "");
@@ -16,13 +41,8 @@ export function normalizeArchivePath(value: string) {
   return parts.join("/");
 }
 
-export async function listArchiveEntries(filePath: string): Promise<ListedEntry[]> {
-  const { stdout } = await run7za(path7za, ["l", "-slt", filePath], {
-    encoding: "utf8",
-    windowsHide: true,
-    maxBuffer: 8 * 1024 * 1024,
-    timeout: 60000
-  });
+export async function listArchiveEntries(filePath: string, signal?: AbortSignal): Promise<ListedEntry[]> {
+  const stdout = await runArchiveWorker({ type: "list", archivePath: filePath }, signal);
   const result: ListedEntry[] = [];
   let inEntries = false;
   let values = new Map<string, string>();

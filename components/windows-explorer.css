@@ -149,10 +149,23 @@
 .win-signout svg { height: 15px; width: 15px; }
 
 .win-file-area { background: #191919; display: flex; flex-direction: column; grid-column: 2; grid-row: 3; min-height: 0; min-width: 0; overflow: hidden; position: relative; }
-.win-notice { align-items: center; background: #273746; color: #dceeff; display: flex; flex: 0 0 auto; gap: 8px; min-height: 32px; padding: 4px 10px; }
-.win-notice.is-error { background: #492b2b; color: #ffdada; }
-.win-notice button { height: 24px; margin-left: auto; width: 24px; }
-.win-notice button svg { height: 14px; width: 14px; }
+.win-toast { align-items: center; background: #273746; border: 1px solid #47647e; border-radius: 8px; box-shadow: 0 8px 24px #0005; color: #eaf4ff; display: flex; gap: 9px; max-width: min(440px, calc(100vw - 24px)); min-height: 42px; padding: 7px 10px; position: fixed; right: 12px; top: 12px; z-index: 90; }
+.win-toast > span { line-height: 1.4; overflow-wrap: anywhere; }
+.win-toast.is-error { background: #492b2b; border-color: #794747; color: #ffdada; }
+.win-toast button { flex: 0 0 26px; height: 26px; margin-left: auto; width: 26px; }
+.win-toast button svg { height: 14px; width: 14px; }
+.win-login-toast { position: fixed; }
+.win-toast .win-spin { height: 16px; width: 16px; }
+.win-dialog-backdrop { align-items: center; background: #0008; display: flex; inset: 0; justify-content: center; padding: 16px; position: fixed; z-index: 80; }
+.win-dialog { background: var(--win-panel-raised); border: 1px solid var(--win-line); border-radius: 10px; box-shadow: 0 18px 54px #0008; color: var(--win-text); max-width: 460px; padding: 20px; width: 100%; }
+.win-dialog h2 { font-size: 17px; margin: 0 0 9px; }
+.win-dialog p { color: var(--win-muted); line-height: 1.5; margin: 0 0 13px; }
+.win-conflict-list { display: grid; gap: 5px; max-height: 180px; overflow: auto; }
+.win-conflict-list div { align-items: center; display: grid; gap: 9px; grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr); }
+.win-conflict-list span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.win-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+.win-dialog-actions button { border: 1px solid var(--win-line); min-height: 34px; padding: 0 12px; }
+.win-dialog-actions button.is-primary { background: #1768b5; color: #fff; }
 .win-table-head, .win-row { display: grid; grid-template-columns: minmax(140px, 1fr) var(--win-modified-width, 180px) var(--win-type-width, 130px) var(--win-size-width, 100px); }
 .win-table-head { background: #191919; border-bottom: 1px solid #373737; color: #dedede; flex: 0 0 34px; height: 34px; }
 .win-name-head, .win-col-head > button:first-child { color: #e5e5e5; font-size: 12px; justify-content: flex-start; overflow: hidden; padding: 0 14px; text-overflow: ellipsis; white-space: nowrap; }
@@ -212,6 +225,11 @@
 .win-preview-placeholder { align-items: center; color: #c1c1c1; display: flex; flex-direction: column; gap: 13px; height: 100%; justify-content: center; text-align: center; width: 100%; }
 .win-preview-placeholder > svg { color: #c5c5c5; height: 44px; width: 44px; }
 .win-preview-placeholder span { font-size: 12px; line-height: 1.5; max-width: 90%; }
+.win-preview-large-notice { align-items: center; color: var(--win-muted); display: flex; flex-direction: column; gap: 12px; height: 100%; justify-content: center; padding: 24px; text-align: center; }
+.win-preview-large-notice > svg { color: var(--win-blue); height: 38px; width: 38px; }
+.win-preview-large-notice strong { color: var(--win-text); font-size: 14px; }
+.win-preview-large-notice button { background: #1768b5; color: #fff; min-height: 34px; padding: 0 13px; }
+.win-preview-partial-note { background: color-mix(in srgb, var(--win-blue) 16%, var(--win-panel)); color: var(--win-text); font-size: 11px; padding: 7px 10px; }
 .win-archive-summary-icon { color: #e5b64c; height: 52px; width: 52px; }
 .win-preview-image { height: 100%; max-height: 100%; max-width: 100%; object-fit: contain; width: 100%; }
 .win-preview-frame { background: #fff; border: 0; height: 100%; min-height: 500px; width: 100%; }
@@ -239,7 +257,12 @@
 .win-docx-render { height: 100%; overflow: auto; padding: 16px; width: 100%; }
 .win-docx-render .win-docx-page-wrapper { background: transparent !important; padding: 0 !important; }
 .win-docx-render .win-docx-page { background: #fff !important; box-shadow: 0 2px 12px #0005; margin: 0 auto 18px !important; }
-.win-statusbar { align-items: center; background: #202020; border-top: 1px solid #353535; color: #c6c6c6; display: flex; font-size: 11px; grid-column: 1 / -1; grid-row: 4; justify-content: space-between; padding: 0 8px 0 14px; }
+.win-statusbar { align-items: center; background: #202020; border-top: 1px solid #353535; color: #c6c6c6; display: flex; font-size: 11px; gap: 14px; grid-column: 1 / -1; grid-row: 4; justify-content: space-between; padding: 0 8px 0 14px; }
+.win-upload-progress { align-items: center; display: grid; flex: 0 1 340px; gap: 1px 9px; grid-template-columns: minmax(0, 1fr) auto; min-width: 130px; }
+.win-upload-progress > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.win-upload-progress > strong { font-size: 10px; font-weight: 500; }
+.win-upload-progress > i { background: var(--win-storage-track); border-radius: 3px; grid-column: 1 / -1; height: 3px; overflow: hidden; }
+.win-upload-progress > i > b { background: var(--win-blue); border-radius: inherit; display: block; height: 100%; transition: width 120ms linear; }
 .win-view-switch { align-items: center; display: flex; gap: 2px; }
 .win-view-switch button { border: 1px solid transparent; border-radius: 3px; height: 23px; width: 25px; }
 .win-view-switch button.is-active { background: #373737; border-color: #535353; }
@@ -303,6 +326,10 @@
 .win-shell[data-theme="light"] .win-preview-table { color: #202020; }
 .win-shell[data-theme="light"] .win-preview-table td { border-color: #d2d2d2; }
 .win-shell[data-theme="light"] .win-row input { background: #fff; color: #111; }
+.win-shell[data-theme="light"] .win-toast { background: #eff7ff; border-color: #c5dff7; color: #1d3346; }
+.win-shell[data-theme="light"] .win-toast.is-error { background: #fff1f0; border-color: #f1c5c2; color: #6e221e; }
+.win-shell[data-theme="light"] .win-dialog { background: #fff; }
+.win-shell[data-theme="light"] .win-dialog-actions button.is-primary { background: #0878d4; color: #fff; }
 
 @media (max-width: 1050px) {
   .win-shell { grid-template-columns: 205px minmax(0, 1fr) 285px; }

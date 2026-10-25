@@ -17,12 +17,12 @@ export async function GET(request: Request, { params }: Params) {
   const { id } = await params;
   if (!isUuid(id)) return jsonError("파일 ID가 올바르지 않습니다.");
   try {
-    const [file] = await query<FileRow>("SELECT id, folder_id, name, mime_type, size_bytes, created_at, updated_at FROM cloud_files WHERE id = ? AND owner_id = ? AND deleted_at IS NULL LIMIT 1", [id, context.user.id]);
+    const [file] = await query<FileRow>("SELECT id, folder_id, name, mime_type, size_bytes, created_at, updated_at FROM cloud_files WHERE id = ? AND owner_id = ? LIMIT 1", [id, context.user.id]);
     if (!file || !["zip", "7z", "tar"].includes(getFileExtension(file.name))) return jsonError("압축 파일을 찾을 수 없습니다.", 404);
     const rawPath = new URL(request.url).searchParams.get("path") ?? "";
     const currentPath = rawPath ? normalizeArchivePath(rawPath) : "";
     if (currentPath === null) return jsonError("압축 파일 경로가 올바르지 않습니다.");
-    const entries = await listArchiveEntries(getStoredFilePath(context.user.id, id));
+    const entries = await listArchiveEntries(getStoredFilePath(context.user.id, id), request.signal);
     if (currentPath && !entries.some((entry) => entry.path === currentPath || entry.path.startsWith(currentPath + "/"))) return jsonError("압축 파일 내부 경로를 찾을 수 없습니다.", 404);
     return NextResponse.json({ file, path: currentPath, entries: listArchiveChildren(entries, currentPath) }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {

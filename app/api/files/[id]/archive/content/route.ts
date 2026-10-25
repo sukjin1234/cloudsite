@@ -1,10 +1,11 @@
-import { spawn } from "node:child_process";
-import { once } from "node:events";
+import { createReadStream } from "node:fs";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { Readable } from "node:stream";
-import { path7za } from "7zip-bin";
 import type { RowDataPacket } from "mysql2/promise";
 import { isAuthError, jsonError, requireUser } from "@/lib/auth";
-import { listArchiveEntries, normalizeArchivePath } from "@/lib/archive-utils";
+import { listArchiveEntries, normalizeArchivePath, runArchiveWorker } from "@/lib/archive-utils";
 import { query } from "@/lib/db";
 import { getStoredFilePath } from "@/lib/file-storage";
 import { getFileExtension, isUuid } from "@/lib/file-utils";
@@ -32,26 +33,46 @@ export async function GET(request: Request, { params }: Params) {
   const safePath = normalizeArchivePath(entryPath);
   if (!safePath) return jsonError("압축 파일 경로가 올바르지 않습니다.");
   try {
-    const [file] = await query<FileRow>("SELECT id, folder_id, name, mime_type, size_bytes, created_at, updated_at FROM cloud_files WHERE id = ? AND owner_id = ? AND deleted_at IS NULL LIMIT 1", [id, context.user.id]);
+    const [file] = await query<FileRow>("SELECT id, folder_id, name, mime_type, size_bytes, created_at, updated_at FROM cloud_files WHERE id = ? AND owner_id = ? LIMIT 1", [id, context.user.id]);
     if (!file || !["zip", "7z", "tar"].includes(getFileExtension(file.name))) return jsonError("압축 파일을 찾을 수 없습니다.", 404);
     const archivePath = getStoredFilePath(context.user.id, id);
-    const entry = (await listArchiveEntries(archivePath)).find((item) => item.path === safePath && !item.folder);
+    const entry = (await listArchiveEntries(archivePath, request.signal)).find((item) => item.path === safePath && !item.folder);
     if (!entry) return jsonError("압축 파일 내부 파일을 찾을 수 없습니다.", 404);
-    const extractor = spawn(path7za, ["x", "-so", "-spd", archivePath, entry.sourcePath], {
-      stdio: ["ignore", "pipe", "ignore"], windowsHide: true
-    });
-    const closed = once(extractor, "close");
-    const output = Readable.from((async function* () {
-      for await (const chunk of extractor.stdout) yield chunk;
-      const [code] = await closed as [number | null, NodeJS.Signals | null];
-      if (code !== 0) throw new Error("압축 파일에서 내용을 읽지 못했습니다.");
-    })());
-    output.on("close", () => {
-      if (!output.readableEnded && extractor.exitCode === null) extractor.kill();
-    });
-    const mime = CONTENT_TYPES[getFileExtension(safePath)] ?? "application/octet-stream";
-    return new Response(Readable.toWeb(output) as ReadableStream, { headers: { "Cache-Control": "private, no-store", "Content-Length": String(entry.size), "Content-Security-Policy": "default-src 'none'; sandbox", "Content-Type": mime, "X-Content-Type-Options": "nosniff" } });
+    const outputDirectory = await mkdtemp(path.join(tmpdir(), "cloud-preview-"));
+    try {
+      await runArchiveWorker({ type: "extract", archivePath, outputPath: outputDirectory, entryPath: entry.sourcePath }, request.signal);
+      const extractedPath = path.join(outputDirectory, ...entry.path.split("/"));
+      const details = await stat(extractedPath);
+      if (!details.isFile()) throw new Error("압축 파일 내부 파일을 찾지 못했습니다.");
+      const rangeHeader = request.headers.get("range");
+      let start = 0;
+      let end = details.size - 1;
+      let status = 200;
+      if (rangeHeader) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+        if (!match || (!match[1] && !match[2]) || details.size === 0) {
+          await rm(outputDirectory, { force: true, recursive: true });
+          return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${details.size}`, "Accept-Ranges": "bytes" } });
+        }
+        if (!match[1]) start = Math.max(0, details.size - Number(match[2]));
+        else { start = Number(match[1]); end = match[2] ? Math.min(Number(match[2]), details.size - 1) : details.size - 1; }
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= details.size) {
+          await rm(outputDirectory, { force: true, recursive: true });
+          return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${details.size}`, "Accept-Ranges": "bytes" } });
+        }
+        status = 206;
+      }
+      const output = createReadStream(extractedPath, status === 206 ? { start, end } : undefined);
+      output.once("close", () => { void rm(outputDirectory, { force: true, recursive: true }); });
+      const mime = CONTENT_TYPES[getFileExtension(safePath)] ?? "application/octet-stream";
+      const headers = new Headers({ "Accept-Ranges": "bytes", "Cache-Control": "private, no-store", "Content-Length": String(end - start + 1), "Content-Security-Policy": "default-src 'none'; sandbox", "Content-Type": mime, "X-Content-Type-Options": "nosniff" });
+      if (status === 206) headers.set("Content-Range", `bytes ${start}-${end}/${details.size}`);
+      return new Response(Readable.toWeb(output) as ReadableStream, { headers, status });
+    } catch (error) {
+      await rm(outputDirectory, { force: true, recursive: true });
+      throw error;
+    }
   } catch (error) {
-    return jsonError(error instanceof Error ? error.message : "압축 파일 내부 미리보기를 열지 못했습니다.", 500);
+    return jsonError(error instanceof Error ? error.message : "압축 파일 내부 미리보기를 열지 못했습니다.", 422);
   }
 }

@@ -57,16 +57,39 @@ export async function GET(request: Request, { params }: Params) {
       return jsonError("저장된 파일을 찾을 수 없습니다.", 404);
     }
 
+    const rangeHeader = request.headers.get("range");
+    let start = 0;
+    let end = details.size - 1;
+    let status = 200;
+    if (rangeHeader) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+      if (!match || (!match[1] && !match[2]) || details.size === 0) {
+        return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${details.size}`, "Accept-Ranges": "bytes" } });
+      }
+      if (!match[1]) {
+        const suffix = Number(match[2]);
+        start = Math.max(0, details.size - suffix);
+      } else {
+        start = Number(match[1]);
+        end = match[2] ? Math.min(Number(match[2]), details.size - 1) : details.size - 1;
+      }
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= details.size) {
+        return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${details.size}`, "Accept-Ranges": "bytes" } });
+      }
+      status = 206;
+    }
     const headers = new Headers({
+      "Accept-Ranges": "bytes",
       "Cache-Control": "private, no-store",
       "Content-Disposition": `inline; filename*=UTF-8''${encodeFilename(file.name)}`,
-      "Content-Length": String(details.size),
+      "Content-Length": String(end - start + 1),
       "Content-Security-Policy": "default-src 'none'; sandbox",
       "Content-Type": file.mime_type || "application/octet-stream",
       "X-Content-Type-Options": "nosniff"
     });
-    const body = Readable.toWeb(createReadStream(filePath)) as ReadableStream;
-    return new Response(body, { headers });
+    if (status === 206) headers.set("Content-Range", `bytes ${start}-${end}/${details.size}`);
+    const body = Readable.toWeb(createReadStream(filePath, status === 206 ? { start, end } : undefined)) as ReadableStream;
+    return new Response(body, { headers, status });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "파일을 불러오지 못했습니다.", 500);
   }
