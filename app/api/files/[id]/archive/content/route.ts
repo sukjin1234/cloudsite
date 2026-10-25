@@ -17,10 +17,11 @@ type Params = { params: Promise<{ id: string }> };
 type FileRow = RowDataPacket & CloudFile;
 
 const CONTENT_TYPES: Record<string, string> = {
-  csv: "text/csv; charset=utf-8", css: "text/css; charset=utf-8", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  gif: "image/gif", html: "text/html; charset=utf-8", jpeg: "image/jpeg", jpg: "image/jpeg", js: "text/javascript; charset=utf-8",
-  json: "application/json; charset=utf-8", md: "text/markdown; charset=utf-8", mp3: "audio/mpeg", mp4: "video/mp4", pdf: "application/pdf",
-  png: "image/png", svg: "image/svg+xml", txt: "text/plain; charset=utf-8", webp: "image/webp", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  aac: "audio/aac", csv: "text/csv; charset=utf-8", css: "text/css; charset=utf-8", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  flac: "audio/flac", gif: "image/gif", html: "text/html; charset=utf-8", jpeg: "image/jpeg", jpg: "image/jpeg", js: "text/javascript; charset=utf-8",
+  json: "application/json; charset=utf-8", m4a: "audio/mp4", md: "text/markdown; charset=utf-8", mkv: "video/x-matroska", mov: "video/quicktime",
+  mp3: "audio/mpeg", mp4: "video/mp4", ogg: "audio/ogg", pdf: "application/pdf", png: "image/png", svg: "image/svg+xml",
+  txt: "text/plain; charset=utf-8", wav: "audio/wav", webm: "video/webm", webp: "image/webp", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   xml: "application/xml; charset=utf-8", yml: "text/yaml; charset=utf-8", yaml: "text/yaml; charset=utf-8"
 };
 

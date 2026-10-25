@@ -245,7 +245,7 @@
 .win-view-switch button.is-active { background: #373737; border-color: #535353; }
 .win-view-switch svg { height: 15px; width: 15px; }
 .win-context-backdrop { inset: 0; position: fixed; z-index: 50; }
-.win-context-menu { min-width: 210px; position: absolute; }
+.win-context-menu { max-height: calc(100vh - 16px); min-width: 210px; overflow: auto; position: absolute; }
 .win-sidebar-backdrop { display: none !important; }
 .win-spin { animation: win-spin 1s linear infinite; }
 @keyframes win-spin { to { transform: rotate(360deg); } }

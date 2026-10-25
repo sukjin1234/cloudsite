@@ -930,7 +930,7 @@ export function WindowsExplorer() {
       <button aria-label="큰 아이콘" aria-pressed={view === "icons"} className={view === "icons" ? "is-active" : ""} onClick={() => setView("icons")} title="큰 아이콘" type="button"><Grid2X2 /></button>
     </div></footer>
 
-    {contextMenu ? <div className="win-context-backdrop" onClick={() => setContextMenu(null)}><div className="win-menu win-context-menu" onClick={(event) => event.stopPropagation()} style={{ left: Math.min(contextMenu.x, window.innerWidth - 235), top: Math.min(contextMenu.y, window.innerHeight - 280) }}>
+    {contextMenu ? <div className="win-context-backdrop" onClick={() => setContextMenu(null)}><div className="win-menu win-context-menu" onClick={(event) => event.stopPropagation()} style={{ left: Math.min(contextMenu.x, window.innerWidth - 235), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 360)) }}>
       {contextMenu.pinned ? <>
         <button onClick={() => { setContextMenu(null); void navigate(contextMenu.pinned!); }} type="button"><ExplorerFolderIcon />열기</button>
         <button onClick={() => { setContextMenu(null); void renamePinned(contextMenu.pinned!); }} type="button"><Pencil />이름 바꾸기</button>

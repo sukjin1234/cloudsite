@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 RUN npm ci
+RUN chmod +x node_modules/7zip-bin/linux/*/7za
 
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1

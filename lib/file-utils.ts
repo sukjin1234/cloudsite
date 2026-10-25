@@ -40,6 +40,9 @@ const SPREADSHEET_EXTENSIONS = new Set([
   "xltx",
   "xltm"
 ]);
+const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"]);
+const AUDIO_EXTENSIONS = new Set(["aac", "flac", "m4a", "mp3", "ogg", "wav"]);
+const VIDEO_EXTENSIONS = new Set(["m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm"]);
 
 export function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
@@ -148,7 +151,7 @@ export function getPreviewKind(mimeType: string, fileName: string): PreviewKind 
     return "archive";
   }
 
-  if (mime.startsWith("image/")) {
+  if (mime.startsWith("image/") || IMAGE_EXTENSIONS.has(extension)) {
     return "image";
   }
 
@@ -179,11 +182,11 @@ export function getPreviewKind(mimeType: string, fileName: string): PreviewKind 
     return "text";
   }
 
-  if (mime.startsWith("audio/")) {
+  if (mime.startsWith("audio/") || AUDIO_EXTENSIONS.has(extension)) {
     return "audio";
   }
 
-  if (mime.startsWith("video/")) {
+  if (mime.startsWith("video/") || VIDEO_EXTENSIONS.has(extension)) {
     return "video";
   }
 
