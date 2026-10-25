@@ -186,6 +186,8 @@ export function WindowsExplorer() {
   const resizeState = useRef<{ target: "modified" | "type" | "size" | "preview"; x: number; width: number } | null>(null);
   const pendingEditAction = useRef<(() => void) | null>(null);
   const current = isTrash ? trashCrumbs[trashCrumbs.length - 1] ?? TRASH : crumbs[crumbs.length - 1] ?? HOME;
+  const navigationState = useRef({ crumbs, history, historyIndex });
+  navigationState.current = { crumbs, history, historyIndex };
 
   const loadListing = useCallback(async (folderId: string | null, search = "") => {
     setNotice("");
@@ -540,6 +542,24 @@ export function WindowsExplorer() {
     setIsTrash(false); setArchiveView(null); setArchiveSelected(null); setCrumbs(path); setSelected([]); setQuery("");
     setHistory((old) => [...old.slice(0, historyIndex + 1), path]); setHistoryIndex((old) => old + 1);
   }
+  function removeDeletedFoldersFromHistory(folderIds: string[]) {
+    const removed = new Set(folderIds);
+    const state = navigationState.current;
+    const deletedAncestorIndex = state.crumbs.findIndex((crumb) => crumb.id !== null && removed.has(crumb.id));
+    const path = deletedAncestorIndex > 0 ? state.crumbs.slice(0, deletedAncestorIndex) : state.crumbs;
+    const isDeletedPath = (entry: Crumb[]) => entry.some((crumb) => crumb.id !== null && removed.has(crumb.id));
+    const pathKey = (entry: Crumb[]) => entry.map((crumb) => crumb.id ?? "root").join("/");
+    const nextHistory = state.history.filter((entry) => !isDeletedPath(entry));
+    let nextIndex = nextHistory.findIndex((entry) => pathKey(entry) === pathKey(path));
+    if (nextIndex < 0) {
+      nextHistory.push(path);
+      nextIndex = nextHistory.length - 1;
+    }
+    setHistory(nextHistory);
+    setHistoryIndex(nextIndex);
+    if (deletedAncestorIndex > 0) setCrumbs(path);
+    return { path, movedUp: deletedAncestorIndex > 0 };
+  }
   function navigate(folder: CloudFolder) { guardUnsavedEdit(() => { void navigateNow(folder); }); }
   async function navigateNow(folder: CloudFolder) {
     try {
@@ -623,7 +643,7 @@ export function WindowsExplorer() {
           path.push({ id: folder.id, name: folder.name }); folderId = folder.id;
         }
         setIsTrash(true); setTrashCrumbs(path); setArchiveView(null); setArchiveSelected(null); setSelected([]); setQuery(""); setAddressEditing(false); return;
-      } catch { setAddressEditing(false); setNotice("'" + rawAddress + "'을(를) 찾을 수 없습니다."); return; }
+      } catch { setAddressEditing(false); setNotice("폴더가 없습니다: '" + rawAddress + "'"); return; }
     }
     let parentId: string | null = null; const path: Crumb[] = [HOME];
     try {
@@ -637,7 +657,7 @@ export function WindowsExplorer() {
       setAddressEditing(false); pushPath(path);
     } catch {
       setAddressEditing(false);
-      setNotice("'" + rawAddress + "'을(를) 찾을 수 없습니다.");
+      setNotice("폴더가 없습니다: '" + rawAddress + "'");
     }
   }
   function changeSelection(type: NodeRef["type"], id: string, event: MouseEvent) {
@@ -823,7 +843,10 @@ export function WindowsExplorer() {
     try {
       for (const item of items) await api("/api/" + (item.type === "folder" ? "folders" : "files") + "/" + item.id, { method: "DELETE" });
       setSelected([]); setPreview({ status: "idle" });
-      await Promise.all([loadListing(current.id, query), loadPinned(), loadStorage(), loadTrashStatus()]);
+      const deletedFolderIds = items.filter((item) => item.type === "folder").map((item) => item.id);
+      const { path, movedUp } = removeDeletedFoldersFromHistory(deletedFolderIds);
+      if (movedUp) setQuery("");
+      await Promise.all([loadListing(movedUp ? path.at(-1)?.id ?? null : current.id, movedUp ? "" : query), loadPinned(), loadStorage(), loadTrashStatus()]);
     } catch (error) { setNotice(error instanceof Error ? error.message : "삭제하지 못했습니다."); }
     finally { setBusy(""); }
   }
