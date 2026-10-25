@@ -87,7 +87,7 @@ export function WindowsExplorer() {
   const [historyIndex, setHistoryIndex] = useState(0);
   const [listing, setListing] = useState<Listing>({ files: [], folders: [] });
   const [pinned, setPinned] = useState<CloudFolder[]>([]);
-  const [sidebarFiles, setSidebarFiles] = useState<CloudFile[]>([]);
+  const [trashSidebarFolders, setTrashSidebarFolders] = useState<ExplorerFolder[]>([]);
   const [trashHasItems, setTrashHasItems] = useState(false);
   const [storage, setStorage] = useState<StorageUsage>({ usedBytes: 0, quotaBytes: 0 });
   const [selected, setSelected] = useState<string[]>([]);
@@ -150,8 +150,11 @@ export function WindowsExplorer() {
       if (isTrash) {
         if (folderId && folderId !== TRASH.id) params.set("folderId", folderId);
         const trashed = await api<{ files: ExplorerFile[]; folders: ExplorerFolder[] }>("/api/trash" + (params.size ? "?" + params : ""));
-        setListing({ files: trashed.files, folders: trashed.folders });
-        if (!folderId || folderId === TRASH.id) setTrashHasItems(trashed.files.length + trashed.folders.length > 0);
+        if (!folderId || folderId === TRASH.id) {
+          setTrashSidebarFolders(trashed.folders);
+          setListing({ files: [], folders: [] });
+          setTrashHasItems(trashed.files.length + trashed.folders.length > 0);
+        } else setListing({ files: trashed.files, folders: trashed.folders });
       } else if (search.trim()) {
         params.set("q", search.trim()); params.set("scope", "current");
         if (folderId) params.set("parentId", folderId);
@@ -165,8 +168,8 @@ export function WindowsExplorer() {
   }, [isTrash]);
   const loadPinned = useCallback(async () => {
     try {
-      const result = await api<{ files?: CloudFile[]; folders: CloudFolder[] }>("/api/folders/pinned");
-      setPinned(result.folders); setSidebarFiles(result.files ?? []);
+      const result = await api<{ folders: CloudFolder[] }>("/api/folders/pinned");
+      setPinned(result.folders);
     }
     catch (error) { setNotice(error instanceof Error ? error.message : "고정 폴더를 불러오지 못했습니다."); }
   }, []);
@@ -174,6 +177,7 @@ export function WindowsExplorer() {
     try {
       const trashed = await api<{ files: ExplorerFile[]; folders: ExplorerFolder[] }>("/api/trash");
       setTrashHasItems(trashed.files.length + trashed.folders.length > 0);
+      setTrashSidebarFolders(trashed.folders);
     } catch { /* Keep the last known trash state if its count is unavailable. */ }
   }, []);
   const loadStorage = useCallback(async () => {
@@ -299,8 +303,8 @@ export function WindowsExplorer() {
     const entry = isTrash ? itemType === "file" ? listing.files.find((file) => file.id === id) : listing.folders.find((folder) => folder.id === id) : undefined;
     return { id, type: itemType, trashRootId: entry?.trash_root_id, trashRootType: entry?.trash_root_type };
   });
-  const selectedBytes = selectedRefs.reduce((sum, item) => sum + Number(listing.files.find((file) => file.id === item.id)?.size_bytes ?? sidebarFiles.find((file) => file.id === item.id)?.size_bytes ?? 0), 0);
-  const selectedFile = selected.length === 1 && selected[0].startsWith("file:") ? listing.files.find((file) => "file:" + file.id === selected[0]) ?? sidebarFiles.find((file) => "file:" + file.id === selected[0]) ?? null : null;
+  const selectedBytes = selectedRefs.reduce((sum, item) => sum + Number(listing.files.find((file) => file.id === item.id)?.size_bytes ?? 0), 0);
+  const selectedFile = selected.length === 1 && selected[0].startsWith("file:") ? listing.files.find((file) => "file:" + file.id === selected[0]) ?? null : null;
   const selectedFolder = selected.length === 1 && selected[0].startsWith("folder:") ? listing.folders.find((folder) => "folder:" + folder.id === selected[0]) ?? null : null;
   const selectedSingle = selectedRefs.length === 1 ? selectedRefs[0] : null;
 
@@ -536,7 +540,7 @@ export function WindowsExplorer() {
       const folder = listing.folders.find((entry) => entry.id === item.id) ?? pinned.find((entry) => entry.id === item.id);
       if (folder) void navigate(folder);
     } else {
-      const file = listing.files.find((entry) => entry.id === item.id) ?? sidebarFiles.find((entry) => entry.id === item.id);
+      const file = listing.files.find((entry) => entry.id === item.id);
       if (file && getPreviewKind(file.mime_type, file.name) === "archive") void loadArchive(file);
       else window.open("/api/files/" + item.id + "/content", "_blank", "noopener,noreferrer");
     }
@@ -741,7 +745,7 @@ export function WindowsExplorer() {
   }
   function getNodeName(item: NodeRef) {
     return item.type === "file"
-      ? listing.files.find((entry) => entry.id === item.id)?.name ?? sidebarFiles.find((entry) => entry.id === item.id)?.name
+      ? listing.files.find((entry) => entry.id === item.id)?.name
       : listing.folders.find((entry) => entry.id === item.id)?.name ?? pinned.find((entry) => entry.id === item.id)?.name;
   }
   async function executeMove(items: NodeRef[], targetId: string | null, collisions: MoveCollision[] = [], overwrite = false) {
@@ -791,12 +795,6 @@ export function WindowsExplorer() {
     setDraggingItems([]);
   }
   function beginRename(item: NodeRef) {
-    const sidebarFile = item.type === "file" && !listing.files.some((file) => file.id === item.id) ? sidebarFiles.find((file) => file.id === item.id) : undefined;
-    if (sidebarFile) {
-      const name = window.prompt("파일 이름", sidebarFile.name)?.trim();
-      if (name && name !== sidebarFile.name) void commitRename(item, name);
-      return;
-    }
     const name = item.type === "folder"
       ? listing.folders.find((folder) => folder.id === item.id)?.name ?? pinned.find((folder) => folder.id === item.id)?.name ?? ""
       : listing.files.find((file) => file.id === item.id)?.name ?? "";
@@ -854,7 +852,7 @@ export function WindowsExplorer() {
       if (!response.ok) throw new Error((await response.json().catch(() => ({})) as { error?: string }).error ?? "압축 파일을 만들지 못했습니다.");
       const objectUrl = URL.createObjectURL(await response.blob());
       const anchor = document.createElement("a"); anchor.href = objectUrl;
-      const itemName = items.length === 1 ? (items[0].type === "folder" ? listing.folders.find((folder) => folder.id === items[0].id)?.name ?? pinned.find((folder) => folder.id === items[0].id)?.name : listing.files.find((file) => file.id === items[0].id)?.name ?? sidebarFiles.find((file) => file.id === items[0].id)?.name) : "선택한 항목";
+      const itemName = items.length === 1 ? (items[0].type === "folder" ? listing.folders.find((folder) => folder.id === items[0].id)?.name ?? pinned.find((folder) => folder.id === items[0].id)?.name : listing.files.find((file) => file.id === items[0].id)?.name) : "선택한 항목";
       anchor.download = (itemName || "선택한 항목") + "." + format; anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
     } catch (error) { setNotice(error instanceof Error ? error.message : "압축 파일을 만들지 못했습니다."); }
@@ -877,7 +875,7 @@ export function WindowsExplorer() {
   }
   async function signOut() {
     await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
-    setUser(null); setListing({ files: [], folders: [] }); setPinned([]); setSidebarFiles([]); setSelected([]); setCrumbs([HOME]); setIsTrash(false);
+    setUser(null); setListing({ files: [], folders: [] }); setPinned([]); setTrashSidebarFolders([]); setSelected([]); setCrumbs([HOME]); setIsTrash(false);
   }
 
   useEffect(() => {
@@ -949,7 +947,7 @@ export function WindowsExplorer() {
   const selectedLabel = archiveView ? archiveSelected ? "1개 항목 선택함" + (archiveSelected.size ? "  " + formatFileSize(archiveSelected.size) : "") : archiveView.entries.length + "개 항목" : selected.length ? selected.length + "개 항목 선택함" + (selectedBytes ? "  " + formatFileSize(selectedBytes) : "") : totalItems + "개 항목";
   const baseCrumbs = isTrash ? trashCrumbs : crumbs;
   const addressCrumbs = archiveView ? [...baseCrumbs, { id: "__archive__", name: archiveView.file.name }, ...archiveView.path.split("/").filter(Boolean).map((name, index) => ({ id: "__archive_path_" + index, name }))] : baseCrumbs;
-  const showSidebarItems = isTrash ? trashCrumbs.length === 1 : !archiveView && crumbs.length === 1;
+  const showSidebarItems = isTrash ? trashCrumbs.length === 1 : !archiveView;
   const usedGb = (storage.usedBytes / (1024 ** 3)).toFixed(3);
   const quotaGb = (storage.quotaBytes / (1024 ** 3)).toFixed(2);
 
@@ -986,7 +984,7 @@ export function WindowsExplorer() {
 
     <nav aria-label="파일 작업" className="win-toolbar">
       {archiveView ? null : isTrash ? <>
-        <button className="win-toolbar-trash-action win-trash-empty" disabled={!totalItems} onClick={() => void emptyTrash()} type="button"><Trash2 /><span>휴지통 비우기</span></button>
+        <button className="win-toolbar-trash-action win-trash-empty" disabled={!trashHasItems} onClick={() => void emptyTrash()} type="button"><Trash2 /><span>휴지통 비우기</span></button>
         <button className="win-toolbar-trash-action" disabled={!selected.length} onClick={() => void restoreItems(selectedRefs)} type="button"><ArrowUp /><span>선택 항목 복원</span></button>
         <button className="win-toolbar-trash-action" disabled={!selected.length} onClick={() => void permanentlyDeleteItems(selectedRefs)} type="button"><Trash2 /><span>영구 삭제</span></button>
       </> : <>
@@ -1022,11 +1020,9 @@ export function WindowsExplorer() {
       {showSidebarItems ? <div className="win-sidebar-heading">{isTrash ? "삭제된 항목" : "고정됨"}</div> : null}
       <div className="win-pinned-list">
         {showSidebarItems ? isTrash ? <>
-          {listing.folders.map((folder) => <button className={"win-sidebar-item " + (selected.includes("folder:" + folder.id) ? "is-current" : "")} key={folder.id} onClick={() => navigateTrashFolder(folder)} onContextMenu={(event) => showItemContext(event, { id: folder.id, type: "folder" })} type="button"><ExplorerFolderIcon /><span title={folder.name}>{folder.name}</span></button>)}
-          {listing.files.map((file) => <button className={"win-sidebar-item " + (selected.includes("file:" + file.id) ? "is-current" : "")} key={file.id} onClick={() => { setSidebarOpen(false); setSelected(["file:" + file.id]); }} onContextMenu={(event) => showItemContext(event, { id: file.id, type: "file" })} type="button"><span className={"win-file-icon win-file-" + getPreviewKind(file.mime_type, file.name)}><FileKindIcon file={file} /></span><span title={file.name}>{file.name}</span></button>)}
+          {trashSidebarFolders.map((folder) => <button className={"win-sidebar-item " + (trashCrumbs.some((crumb) => crumb.id === folder.id) ? "is-current" : "")} key={folder.id} onClick={() => { setTrashCrumbs([TRASH]); navigateTrashFolder(folder); }} onContextMenu={(event) => showItemContext(event, { id: folder.id, type: "folder" })} type="button"><ExplorerFolderIcon /><span title={folder.name}>{folder.name}</span></button>)}
         </> : <>
-          {pinned.map((folder) => <button className={"win-sidebar-item " + (current.id === folder.id ? "is-current " : "") + (dropFolderId === folder.id ? " is-drop-target" : "")} draggable key={folder.id} onClick={() => { setSidebarOpen(false); void navigate(folder); }} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, pinned: folder }); }} onDragStart={(event) => itemDragStart(event, { id: folder.id, type: "folder" })} onDragEnd={() => { setDraggingItems([]); setDropFolderId(null); }} onDragOver={(event) => dropOver(event, folder.id)} onDrop={(event) => void dropOnFolder(event, folder.id)} type="button"><ExplorerFolderIcon /><span title={folder.name}>{folder.name}</span><Pin aria-hidden="true" className="win-pin" /></button>)}
-          {sidebarFiles.map((file) => <button className={"win-sidebar-item " + (selected.includes("file:" + file.id) ? "is-current" : "")} draggable key={file.id} onClick={() => { setSidebarOpen(false); setSelected(["file:" + file.id]); }} onDoubleClick={() => openNode({ id: file.id, type: "file" })} onContextMenu={(event) => showItemContext(event, { id: file.id, type: "file" })} onDragStart={(event) => itemDragStart(event, { id: file.id, type: "file" })} onDragEnd={() => { setDraggingItems([]); setDropFolderId(null); }} type="button"><span className={"win-file-icon win-file-" + getPreviewKind(file.mime_type, file.name)}><FileKindIcon file={file} /></span><span title={file.name}>{file.name}</span></button>)}
+          {pinned.map((folder) => <button className={"win-sidebar-item " + (crumbs.some((crumb) => crumb.id === folder.id) ? "is-current " : "") + (dropFolderId === folder.id ? " is-drop-target" : "")} draggable key={folder.id} onClick={() => { setSidebarOpen(false); void navigate(folder); }} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, pinned: folder }); }} onDragStart={(event) => itemDragStart(event, { id: folder.id, type: "folder" })} onDragEnd={() => { setDraggingItems([]); setDropFolderId(null); }} onDragOver={(event) => dropOver(event, folder.id)} onDrop={(event) => void dropOnFolder(event, folder.id)} type="button"><ExplorerFolderIcon /><span title={folder.name}>{folder.name}</span><Pin aria-hidden="true" className="win-pin" /></button>)}
         </> : null}
       </div>
       <div className="win-sidebar-footer">
@@ -1059,7 +1055,7 @@ export function WindowsExplorer() {
       </div> : null}
       <div className={"win-items " + (view === "icons" ? "is-icons " : "") + (virtualized ? "is-virtualized" : "")} onClick={(event) => { if (event.target === event.currentTarget) setSelected([]); }} onPointerDown={(event) => { if (event.target === event.currentTarget) { event.preventDefault(); setSelectionBox({ startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY }); } }} onDragOver={(event) => dropOver(event, current.id)} onDrop={(event) => void dropOnFolder(event, current.id)} onScroll={(event) => setItemsViewport({ height: event.currentTarget.clientHeight, scrollTop: event.currentTarget.scrollTop, width: event.currentTarget.clientWidth })} ref={itemsViewportRef} style={virtualized ? { height: Math.ceil(totalItems / virtualColumns) * virtualRowHeight, flex: "0 0 auto" } : undefined}>
         {selectionBox ? <div aria-hidden="true" className="win-selection-rectangle" style={{ left: Math.min(selectionBox.startX, selectionBox.x), top: Math.min(selectionBox.startY, selectionBox.y), width: Math.abs(selectionBox.x - selectionBox.startX), height: Math.abs(selectionBox.y - selectionBox.startY) }} /> : null}
-        {newFolderDraft ? <div className={"win-row " + (view === "icons" ? "win-tile" : "")}><ExplorerFolderIcon /><input aria-label="새 폴더 이름" data-new-folder-input value={editName?.value ?? "새 폴더"} onChange={(event) => setEditName({ key: "new-folder", value: event.target.value })} onBlur={() => { if (newFolderDraft) void saveNewFolder(editName?.value ?? "새 폴더"); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void saveNewFolder(editName?.value ?? "새 폴더"); } if (event.key === "Escape") { setNewFolderDraft(false); setEditName(null); } }} /></div> : null}
+        {newFolderDraft ? <div className={"win-row " + (view === "icons" ? "win-tile" : "")}><div className="win-cell win-cell-name"><ExplorerFolderIcon /><input aria-label="새 폴더 이름" className="win-new-folder-input" data-new-folder-input value={editName?.value ?? "새 폴더"} onChange={(event) => setEditName({ key: "new-folder", value: event.target.value })} onBlur={() => { if (newFolderDraft) void saveNewFolder(editName?.value ?? "새 폴더"); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void saveNewFolder(editName?.value ?? "새 폴더"); } if (event.key === "Escape") { setNewFolderDraft(false); setEditName(null); } }} /></div><span className="win-cell win-cell-modified" /><span className="win-cell win-cell-type" /><span className="win-cell win-cell-size" /></div> : null}
         {renderFolders.map((folder, localIndex) => { const index = visibleStart + localIndex; return <div aria-selected={selected.includes("folder:" + folder.id)} className={"win-row " + (view === "icons" ? "win-tile " : "") + (selected.includes("folder:" + folder.id) ? "is-selected " : "") + (dropFolderId === folder.id ? "is-drop-target" : "")} data-item-key={"folder:" + folder.id} draggable={!isTrash} onClick={(event) => changeSelection("folder", folder.id, event)} onContextMenu={(event) => showItemContext(event, { id: folder.id, type: "folder" })} onDoubleClick={() => openNode({ id: folder.id, type: "folder" })} onDragStart={(event) => itemDragStart(event, { id: folder.id, type: "folder" })} onDragEnd={() => { setDraggingItems([]); setDropFolderId(null); }} onDragOver={(event) => dropOver(event, folder.id)} onDrop={(event) => void dropOnFolder(event, folder.id)} key={folder.id} role="row" style={virtualStyle(index)} tabIndex={0}>
           <div className="win-cell win-cell-name"><ExplorerFolderIcon />{editName?.key === "folder:" + folder.id ? <input aria-label="폴더 이름" data-edit-key={"folder:" + folder.id} value={editName.value} onBlur={() => void commitRename({ id: folder.id, type: "folder" }, editName.value)} onChange={(event) => setEditName({ ...editName, value: event.target.value })} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void commitRename({ id: folder.id, type: "folder" }, editName.value); } if (event.key === "Escape") setEditName(null); }} /> : <span title={folder.name}>{folder.name}</span>}</div>
           <span className="win-cell win-cell-modified">{isTrash ? (folder.original_path ?? "내 클라우드") : dateLabel(folder.updated_at)}</span><span className="win-cell win-cell-type">{isTrash ? dateLabel(folder.deleted_at ?? folder.updated_at) : "파일 폴더"}</span><span className="win-cell win-cell-size" />
@@ -1068,7 +1064,7 @@ export function WindowsExplorer() {
           <div className="win-cell win-cell-name">{view === "icons" && getPreviewKind(file.mime_type, file.name) === "image" ? <img alt="" className="win-icon-thumbnail" loading="lazy" src={"/api/files/" + file.id + "/content"} /> : <span className={"win-file-icon win-file-" + getPreviewKind(file.mime_type, file.name)}><FileKindIcon file={file} /></span>}{editName?.key === "file:" + file.id ? <input aria-label="파일 이름" data-edit-key={"file:" + file.id} value={editName.value} onBlur={() => void commitRename({ id: file.id, type: "file" }, editName.value)} onChange={(event) => setEditName({ ...editName, value: event.target.value })} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void commitRename({ id: file.id, type: "file" }, editName.value); } if (event.key === "Escape") setEditName(null); }} /> : <span title={file.name}>{file.name}</span>}</div>
           <span className="win-cell win-cell-modified">{isTrash ? (file.original_path ?? "내 클라우드") : dateLabel(file.updated_at)}</span><span className="win-cell win-cell-type">{isTrash ? dateLabel(file.deleted_at ?? file.updated_at) : fileType(file)}</span><span className="win-cell win-cell-size">{formatFileSize(Number(file.size_bytes))}</span>
         </div>; })}
-        {totalItems === 0 && !newFolderDraft && (isTrash || current.id !== null) ? <div className="win-empty">{isTrash && trashCrumbs.length === 1 ? "휴지통이 비어 있습니다." : "이 폴더는 비어 있습니다."}</div> : null}
+        {totalItems === 0 && !newFolderDraft && (isTrash ? trashCrumbs.length > 1 : current.id !== null) ? <div className="win-empty">이 폴더는 비어 있습니다.</div> : null}
       </div>
       </>}
     </section>
