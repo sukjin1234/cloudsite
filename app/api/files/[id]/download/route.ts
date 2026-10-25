@@ -32,7 +32,7 @@ export async function GET(request: Request, { params }: Params) {
 
   try {
     const [file] = await query<FileRow>(
-      `SELECT ${FILE_SELECT} FROM cloud_files WHERE id = ? AND owner_id = ? LIMIT 1`,
+      `SELECT ${FILE_SELECT} FROM cloud_files WHERE id = ? AND owner_id = ? AND deleted_at IS NULL LIMIT 1`,
       [id, context.user.id]
     );
     if (!file) {

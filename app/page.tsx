@@ -1,5 +1,5 @@
-import { CloudApp } from "@/components/cloud-app";
+import { WindowsExplorer } from "@/components/windows-explorer";
 
 export default function Home() {
-  return <CloudApp />;
+  return <WindowsExplorer />;
 }

@@ -9,6 +9,7 @@ export type SpreadsheetPreview = {
   rows: string[][];
   sheetName: string;
   truncated: boolean;
+  sheets: Array<{ name: string; rows: string[][]; truncated: boolean }>;
 };
 
 const MAX_PREVIEW_COLUMNS = 24;
@@ -35,31 +36,17 @@ function getWorkbookRelationships(relsXml: string | null) {
   return relationships;
 }
 
-function getFirstWorksheetPath(workbookXml: string, relsXml: string | null) {
+function getWorksheetPaths(workbookXml: string, relsXml: string | null) {
   const workbook = parseOfficeXml(workbookXml);
   const sheets = Array.from(workbook.getElementsByTagName("sheet"));
-  const firstSheet = sheets[0];
-
-  if (!firstSheet) {
+  if (!sheets.length) {
     throw new Error("Excel 시트를 찾지 못했습니다.");
   }
-
   const relationships = getWorkbookRelationships(relsXml);
-  const relationshipId =
-    firstSheet.getAttribute("r:id") ||
-    firstSheet.getAttributeNS(
-      "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-      "id"
-    );
-  const sheetName = firstSheet.getAttribute("name") || "Sheet1";
-  const sheetPath =
-    (relationshipId ? relationships.get(relationshipId) : null) ||
-    "xl/worksheets/sheet1.xml";
-
-  return {
-    sheetName,
-    sheetPath
-  };
+  return sheets.map((sheet, index) => {
+    const relationshipId = sheet.getAttribute("r:id") || sheet.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id");
+    return { name: sheet.getAttribute("name") || `Sheet${index + 1}`, path: (relationshipId ? relationships.get(relationshipId) : null) || `xl/worksheets/sheet${index + 1}.xml` };
+  });
 }
 
 function parseSharedStrings(sharedStringsXml: string | null) {
@@ -162,20 +149,13 @@ export async function parseXlsxPreview(buffer: ArrayBuffer): Promise<Spreadsheet
     throw new Error("Excel 통합 문서를 찾지 못했습니다.");
   }
 
-  const { sheetName, sheetPath } = getFirstWorksheetPath(workbookXml, relsXml);
-  const sheetXml = await readOfficeTextEntry(buffer, entries, sheetPath);
-
-  if (!sheetXml) {
-    throw new Error("Excel 시트 내용을 찾지 못했습니다.");
-  }
-
   const sharedStrings = parseSharedStrings(sharedStringsXml);
-  const { rows, truncated } = parseWorksheetRows(sheetXml, sharedStrings);
+  const sheets = await Promise.all(getWorksheetPaths(workbookXml, relsXml).map(async ({ name, path }) => {
+    const sheetXml = await readOfficeTextEntry(buffer, entries, path);
+    if (!sheetXml) throw new Error(`Excel 시트(${name}) 내용을 찾지 못했습니다.`);
+    return { name, ...parseWorksheetRows(sheetXml, sharedStrings) };
+  }));
 
-  return {
-    rows,
-    sheetName,
-    truncated
-  };
+  return { rows: sheets[0].rows, sheetName: sheets[0].name, truncated: sheets.some((sheet) => sheet.truncated), sheets };
 }
 

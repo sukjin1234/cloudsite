@@ -10,7 +10,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import { isAuthError, jsonError, requireUser } from "@/lib/auth";
 import { execute, query } from "@/lib/db";
 import { getStoredFilePath, getUploadRoot } from "@/lib/file-storage";
-import { normalizeOptionalUuid, sanitizeStorageName } from "@/lib/file-utils";
+import { normalizeOptionalUuid, sanitizeStorageName, uniqueDisplayName } from "@/lib/file-utils";
 import type { CloudFile } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -47,6 +47,7 @@ export async function POST(request: Request) {
     await mkdir(join(getUploadRoot(), ".tmp"), { recursive: true });
     const parser = Busboy({
       headers: { "content-type": contentType },
+      defParamCharset: "utf8",
       limits: { fieldSize: 80, fields: 1, fileSize: MAX_FILE_SIZE_BYTES, files: 1 }
     });
     parser.on("field", (name, value) => {
@@ -109,6 +110,27 @@ export async function POST(request: Request) {
         return jsonError("폴더를 찾을 수 없습니다.", 404);
       }
     }
+
+    const [usage] = await query<RowDataPacket & { used_bytes: number; quota_bytes: number }>(
+      "SELECT COALESCE(SUM(f.size_bytes), 0) AS used_bytes, u.storage_quota_bytes AS quota_bytes FROM cloud_users u LEFT JOIN cloud_files f ON f.owner_id = u.id WHERE u.id = ? GROUP BY u.id",
+      [context.user.id]
+    );
+    if (usage && Number(usage.used_bytes) + sizeBytes > Number(usage.quota_bytes)) {
+      await unlink(temporaryPath).catch(() => undefined);
+      return jsonError("저장 공간이 부족합니다.", 413);
+    }
+
+    const [siblings, siblingFolders] = await Promise.all([
+      query<RowDataPacket & { name: string }>(
+        "SELECT name FROM cloud_files WHERE owner_id = ? AND folder_id <=> ? AND deleted_at IS NULL",
+        [context.user.id, folderId]
+      ),
+      query<RowDataPacket & { name: string }>(
+        "SELECT name FROM cloud_folders WHERE owner_id = ? AND parent_id <=> ? AND deleted_at IS NULL",
+        [context.user.id, folderId]
+      )
+    ]);
+    fileName = uniqueDisplayName(fileName, [...siblings, ...siblingFolders].map((row) => row.name), 180);
 
     const id = randomUUID();
     const finalPath = getStoredFilePath(context.user.id, id);

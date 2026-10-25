@@ -45,8 +45,8 @@ export async function GET(request: Request, { params }: Params) {
 
   try {
     const [file] = await query<FileRow>(
-      `SELECT ${FILE_SELECT} FROM cloud_files WHERE id = ? AND owner_id = ? LIMIT 1`,
-      [id, context.user.id]
+      `SELECT ${FILE_SELECT} FROM cloud_files WHERE id = ? AND owner_id = ? AND (deleted_at IS NULL OR ? = 1) LIMIT 1`,
+      [id, context.user.id, previewAccess ? 1 : 0]
     );
     if (!file) {
       return jsonError("파일을 찾을 수 없습니다.", 404);

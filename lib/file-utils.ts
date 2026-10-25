@@ -97,6 +97,27 @@ export function sanitizeStorageName(fileName: string): string {
   return sanitized.slice(0, 180) || fallback;
 }
 
+export function uniqueDisplayName(name: string, existingNames: string[], maxLength: number) {
+  const taken = new Set(existingNames.map((existing) => existing.toLocaleLowerCase()));
+  if (!taken.has(name.toLocaleLowerCase())) {
+    return name;
+  }
+
+  const extensionIndex = name.lastIndexOf(".");
+  const hasExtension = extensionIndex > 0;
+  const base = hasExtension ? name.slice(0, extensionIndex) : name;
+  const extension = hasExtension ? name.slice(extensionIndex) : "";
+  for (let suffix = 2; suffix < 100000; suffix += 1) {
+    const marker = ` (${suffix})`;
+    const candidate = `${base.slice(0, maxLength - marker.length - extension.length)}${marker}${extension}`;
+    if (!taken.has(candidate.toLocaleLowerCase())) {
+      return candidate;
+    }
+  }
+
+  throw new Error("고유한 이름을 만들지 못했습니다.");
+}
+
 export function sanitizeStorageKeyName(fileName: string, fallbackBase: string): string {
   const extension = getFileExtension(fileName).replace(/[^a-z0-9]/g, "").slice(0, 16);
   const nameWithoutExtension = fileName.replace(/\.[^.]*$/, "");
@@ -122,6 +143,10 @@ export function getFileExtension(fileName: string): string {
 export function getPreviewKind(mimeType: string, fileName: string): PreviewKind {
   const mime = mimeType.toLowerCase();
   const extension = getFileExtension(fileName);
+
+  if (["zip", "7z", "tar"].includes(extension)) {
+    return "archive";
+  }
 
   if (mime.startsWith("image/")) {
     return "image";

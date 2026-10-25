@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import { isAuthError, jsonError, requireUser } from "@/lib/auth";
 import { execute, query } from "@/lib/db";
-import { normalizeOptionalUuid, validateDisplayName } from "@/lib/file-utils";
+import { normalizeOptionalUuid, uniqueDisplayName, validateDisplayName } from "@/lib/file-utils";
 import type { CloudFile, Folder } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -11,7 +11,7 @@ export const runtime = "nodejs";
 type FolderRow = RowDataPacket & Folder;
 type FileRow = RowDataPacket & CloudFile;
 
-const FOLDER_SELECT = "id, parent_id, name, created_at, updated_at";
+const FOLDER_SELECT = "id, parent_id, name, created_at, updated_at, is_pinned, pin_order";
 const FILE_SELECT =
   "id, folder_id, name, mime_type, size_bytes, created_at, updated_at";
 
@@ -36,16 +36,16 @@ export async function GET(request: Request) {
     const [currentFolders, folders, files] = await Promise.all([
       parentId
         ? query<FolderRow>(
-            `SELECT ${FOLDER_SELECT} FROM cloud_folders WHERE id = ? AND owner_id = ? LIMIT 1`,
+            `SELECT ${FOLDER_SELECT} FROM cloud_folders WHERE id = ? AND owner_id = ? AND deleted_at IS NULL LIMIT 1`,
             [parentId, context.user.id]
           )
         : Promise.resolve([] as FolderRow[]),
       query<FolderRow>(
-        "SELECT id, parent_id, name, created_at, updated_at FROM cloud_folders WHERE owner_id = ? AND parent_id <=> ? ORDER BY name",
+        "SELECT id, parent_id, name, created_at, updated_at, tags, is_pinned, pin_order FROM cloud_folders WHERE owner_id = ? AND parent_id <=> ? AND deleted_at IS NULL ORDER BY name",
         [context.user.id, parentId]
       ),
       query<FileRow>(
-        `SELECT ${FILE_SELECT} FROM cloud_files WHERE owner_id = ? AND folder_id <=> ? ORDER BY name`,
+        `SELECT ${FILE_SELECT}, tags FROM cloud_files WHERE owner_id = ? AND folder_id <=> ? AND deleted_at IS NULL ORDER BY name`,
         [context.user.id, parentId]
       )
     ]);
@@ -82,7 +82,7 @@ export async function POST(request: Request) {
   try {
     if (parentId) {
       const [parent] = await query<RowDataPacket & { id: string }>(
-        "SELECT id FROM cloud_folders WHERE id = ? AND owner_id = ? LIMIT 1",
+        "SELECT id FROM cloud_folders WHERE id = ? AND owner_id = ? AND deleted_at IS NULL LIMIT 1",
         [parentId, context.user.id]
       );
       if (!parent) {
@@ -90,10 +90,28 @@ export async function POST(request: Request) {
       }
     }
 
+    const [siblings, siblingFiles] = await Promise.all([
+      query<RowDataPacket & { name: string }>(
+        "SELECT name FROM cloud_folders WHERE owner_id = ? AND parent_id <=> ? AND deleted_at IS NULL",
+        [context.user.id, parentId]
+      ),
+      query<RowDataPacket & { name: string }>(
+        "SELECT name FROM cloud_files WHERE owner_id = ? AND folder_id <=> ? AND deleted_at IS NULL",
+        [context.user.id, parentId]
+      )
+    ]);
+    name = uniqueDisplayName(name, [...siblings, ...siblingFiles].map((row) => row.name), 80);
     const id = randomUUID();
+    const isPinned = payload?.isPinned === true;
+    const [pinCount] = isPinned
+      ? await query<RowDataPacket & { next_order: number }>(
+          "SELECT COALESCE(MAX(pin_order), 0) + 1 AS next_order FROM cloud_folders WHERE owner_id = ? AND is_pinned = 1 AND deleted_at IS NULL",
+          [context.user.id]
+        )
+      : [null];
     await execute(
-      "INSERT INTO cloud_folders (id, owner_id, parent_id, name) VALUES (?, ?, ?, ?)",
-      [id, context.user.id, parentId, name]
+      "INSERT INTO cloud_folders (id, owner_id, parent_id, name, is_pinned, pin_order) VALUES (?, ?, ?, ?, ?, ?)",
+      [id, context.user.id, parentId, name, isPinned ? 1 : 0, pinCount?.next_order ?? 0]
     );
     const [folder] = await query<FolderRow>(
       `SELECT ${FOLDER_SELECT} FROM cloud_folders WHERE id = ? AND owner_id = ? LIMIT 1`,

@@ -4,6 +4,10 @@ export type Folder = {
   name: string;
   created_at: string;
   updated_at: string;
+  tags?: string[];
+  deleted_at?: string | null;
+  is_pinned?: boolean;
+  pin_order?: number;
 };
 
 export type CloudFile = {
@@ -14,9 +18,12 @@ export type CloudFile = {
   size_bytes: number;
   created_at: string;
   updated_at: string;
+  tags?: string[];
+  deleted_at?: string | null;
 };
 
 export type PreviewKind =
+  | "archive"
   | "document"
   | "image"
   | "pdf"

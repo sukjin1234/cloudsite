@@ -37,17 +37,13 @@ export async function GET(request: Request, { params }: Params) {
     }
     const kind = getPreviewKind(file.mime_type, file.name);
     const contentUrl = `/api/files/${file.id}/content`;
-    const url =
-      kind === "office"
-        ? new URL(
-            `${contentUrl}?token=${createFilePreviewToken(context.user.id, file.id)}`,
-            request.url
-          ).toString()
-        : contentUrl;
+    const params = new URLSearchParams({
+      token: createFilePreviewToken(context.user.id, file.id)
+    });
     return NextResponse.json({
       file,
       kind,
-      url
+      url: `${contentUrl}?${params.toString()}`
     });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "미리보기를 열지 못했습니다.", 500);
