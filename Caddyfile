@@ -2,7 +2,7 @@
 	default_sni {$SERVER_PUBLIC_IP}
 }
 
-{$SERVER_PUBLIC_IP} {
+{$SERVER_PUBLIC_IP}, whdo.kro.kr {
 	tls {
 		issuer acme {
 			profile shortlived
