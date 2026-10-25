@@ -12,7 +12,7 @@ export async function GET(request: Request) {
   try {
     const [folders, files] = await Promise.all([
       query<RowDataPacket & Folder>(
-        "SELECT id, parent_id, name, created_at, updated_at, tags, is_pinned, pin_order FROM cloud_folders WHERE owner_id = ? AND parent_id IS NULL AND is_pinned = 1 AND deleted_at IS NULL ORDER BY pin_order, created_at",
+        "SELECT id, parent_id, name, created_at, updated_at, tags, is_pinned, pin_order FROM cloud_folders WHERE owner_id = ? AND is_pinned = 1 AND deleted_at IS NULL ORDER BY pin_order, created_at",
         [context.user.id]
       ),
       query<RowDataPacket & { id: string; folder_id: null; name: string; mime_type: string; size_bytes: number; created_at: string; updated_at: string }>(

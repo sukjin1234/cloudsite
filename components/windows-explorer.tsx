@@ -1071,16 +1071,17 @@ export function WindowsExplorer() {
   async function collectDroppedUpload(dataTransfer: DataTransfer, targetId: string | null) {
     const plan: UploadPlan = { targetId, files: [], folders: [] };
     const items = Array.from(dataTransfer.items).filter((item) => item.kind === "file");
-    let foundEntries = false;
-    for (const item of items) {
+    const sources = items.map((item) => {
       const entry = (item as unknown as { webkitGetAsEntry?: () => unknown }).webkitGetAsEntry?.() as WebkitEntry | null | undefined;
-      if (entry) { foundEntries = true; await collectWebkitEntry(entry, [], plan); }
-      else {
-        const file = item.getAsFile();
-        if (file) plan.files.push({ file, path: [file.name] });
-      }
+      return { entry, file: entry ? null : item.getAsFile() };
+    });
+    const fallbackFiles = Array.from(dataTransfer.files);
+    let foundEntries = false;
+    for (const source of sources) {
+      if (source.entry) { foundEntries = true; await collectWebkitEntry(source.entry, [], plan); }
+      else if (source.file) plan.files.push({ file: source.file, path: [source.file.name] });
     }
-    if (!foundEntries && !plan.files.length && dataTransfer.files.length) return planFromFiles(dataTransfer.files, targetId);
+    if (!foundEntries && !plan.files.length && fallbackFiles.length) return planFromFiles(fallbackFiles, targetId);
     return plan;
   }
   async function moveNode(item: NodeRef, targetId: string | null) {
@@ -1421,7 +1422,7 @@ export function WindowsExplorer() {
         </> : <>
           {pinned.map((folder) => {
             const key = "folder:" + folder.id;
-            const isCurrent = crumbs[1]?.id === folder.id;
+            const isCurrent = crumbs.some((crumb) => crumb.id === folder.id);
             if (editName?.key === key && editName.surface === "sidebar") {
               return <div className="win-sidebar-item is-name-editing" key={folder.id}><ExplorerFolderIcon />{renderNameEditor(key, "folder", "폴더 이름", folder.name, "sidebar")}</div>;
             }
