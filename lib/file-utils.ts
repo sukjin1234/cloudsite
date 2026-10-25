@@ -89,6 +89,23 @@ export function validateDisplayName(
   return name;
 }
 
+export function validateWindowsDisplayName(
+  value: unknown,
+  options: { maxLength: number; label: string }
+): string {
+  const name = validateDisplayName(value, options);
+  if (/[<>:"/\\|?*]/.test(name)) {
+    throw new Error("이름에 사용할 수 없는 문자가 있습니다. \\ / : * ? \" < > |");
+  }
+  return name;
+}
+
+export function ensureTextFileExtension(name: string): string {
+  const clean = name.trim().replace(/\.+$/, "");
+  const dot = clean.lastIndexOf(".");
+  return dot > 0 ? clean : `${clean}.txt`;
+}
+
 export function sanitizeStorageName(fileName: string): string {
   const fallback = "upload";
   const sanitized = fileName

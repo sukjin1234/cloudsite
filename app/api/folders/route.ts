@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import { isAuthError, jsonError, requireUser } from "@/lib/auth";
 import { execute, query } from "@/lib/db";
-import { normalizeOptionalUuid, uniqueDisplayName, validateDisplayName } from "@/lib/file-utils";
+import { normalizeOptionalUuid, uniqueDisplayName, validateWindowsDisplayName } from "@/lib/file-utils";
 import type { CloudFile, Folder } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -73,7 +73,7 @@ export async function POST(request: Request) {
   let name: string;
   let parentId: string | null;
   try {
-    name = validateDisplayName(payload?.name, { label: "폴더 이름", maxLength: 80 });
+    name = validateWindowsDisplayName(payload?.name, { label: "폴더 이름", maxLength: 80 });
     parentId = normalizeOptionalUuid(payload?.parentId);
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "폴더 정보가 올바르지 않습니다.");

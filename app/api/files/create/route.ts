@@ -6,7 +6,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import { isAuthError, jsonError, requireUser } from "@/lib/auth";
 import { execute, query } from "@/lib/db";
 import { getStoredFilePath, getUploadRoot } from "@/lib/file-storage";
-import { normalizeOptionalUuid, uniqueDisplayName, validateDisplayName } from "@/lib/file-utils";
+import { ensureTextFileExtension, normalizeOptionalUuid, uniqueDisplayName, validateWindowsDisplayName } from "@/lib/file-utils";
 import type { CloudFile } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -28,7 +28,8 @@ export async function POST(request: Request) {
   let name: string;
   let folderId: string | null;
   try {
-    name = validateDisplayName(payload?.name, { label: "파일 이름", maxLength: 180 });
+    name = ensureTextFileExtension(validateWindowsDisplayName(payload?.name, { label: "파일 이름", maxLength: 180 }));
+    if (name.length > 180) throw new Error("파일 이름이 너무 깁니다.");
     folderId = normalizeOptionalUuid(payload?.parentId);
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "파일 정보가 올바르지 않습니다.");

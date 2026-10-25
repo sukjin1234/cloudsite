@@ -3,7 +3,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import type { ExecuteValues } from "mysql2/promise";
 import { isAuthError, jsonError, requireUser } from "@/lib/auth";
 import { execute, query } from "@/lib/db";
-import { isUuid, normalizeOptionalUuid, uniqueDisplayName, validateDisplayName } from "@/lib/file-utils";
+import { isUuid, normalizeOptionalUuid, uniqueDisplayName, validateWindowsDisplayName } from "@/lib/file-utils";
 import type { CloudFile } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -37,7 +37,7 @@ export async function PATCH(request: Request, { params }: Params) {
   let requestedName: string | undefined;
   if ("name" in payload) {
     try {
-      requestedName = validateDisplayName(payload.name, { label: "파일 이름", maxLength: 180 });
+      requestedName = validateWindowsDisplayName(payload.name, { label: "파일 이름", maxLength: 180 });
     } catch (error) {
       return jsonError(error instanceof Error ? error.message : "파일 이름이 올바르지 않습니다.");
     }

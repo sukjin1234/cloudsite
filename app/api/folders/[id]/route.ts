@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import type { RowDataPacket } from "mysql2/promise";
 import { isAuthError, jsonError, requireUser } from "@/lib/auth";
 import { execute, query } from "@/lib/db";
-import { isUuid, normalizeOptionalUuid, uniqueDisplayName, validateDisplayName } from "@/lib/file-utils";
+import { isUuid, normalizeOptionalUuid, uniqueDisplayName, validateWindowsDisplayName } from "@/lib/file-utils";
 import type { Folder } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -44,7 +44,7 @@ export async function PATCH(request: Request, { params }: Params) {
   }
   if ("name" in payload) {
     try {
-      nextName = validateDisplayName(payload.name, { label: "폴더 이름", maxLength: 80 });
+      nextName = validateWindowsDisplayName(payload.name, { label: "폴더 이름", maxLength: 80 });
     } catch (error) {
       return jsonError(error instanceof Error ? error.message : "폴더 이름이 올바르지 않습니다.");
     }
